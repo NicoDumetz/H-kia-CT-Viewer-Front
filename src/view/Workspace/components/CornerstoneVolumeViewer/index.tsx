@@ -120,8 +120,23 @@ type VoxelPoint = {
 type SliceIndexByPlane = Record<MprViewportKey, number>;
 
 type MprState = {
+  activePlane: MprViewportKey;
   crosshairVoxel: VoxelPoint;
+  isDraggingCrosshair: boolean;
   sliceIndexByPlane: SliceIndexByPlane;
+};
+
+type ViewportProbeState = {
+  hu: number | null;
+  voxel: VoxelPoint | null;
+  world: number[] | null;
+};
+
+type OrientationLabelSet = {
+  top: string;
+  right: string;
+  bottom: string;
+  left: string;
 };
 
 type CanvasPoint = {
@@ -131,6 +146,7 @@ type CanvasPoint = {
 
 type CanvasWorldViewport = Types.IViewport & {
   canvasToWorld?: (canvasPos: Types.Point2) => Types.Point3;
+  getZoom?: () => number;
   worldToCanvas?: (worldPos: Types.Point3) => Types.Point2;
 };
 
@@ -342,7 +358,9 @@ function createInitialMprState(
   const sliceIndexByPlane = getInitialSliceIndices(source);
 
   return {
+    activePlane: "axial",
     crosshairVoxel: getVoxelFromSliceIndices(sliceIndexByPlane),
+    isDraggingCrosshair: false,
     sliceIndexByPlane,
   };
 }
@@ -368,8 +386,107 @@ function getViewportDimensions(
   return shape[0] && shape[2] ? `${shape[0]} x ${shape[2]}` : undefined;
 }
 
+function formatNumber(value: number, digits = 1) {
+  if (!Number.isFinite(value)) {
+    return "-";
+  }
+
+  return value.toFixed(digits);
+}
+
+function formatVoxel(voxel: VoxelPoint | null) {
+  if (!voxel) {
+    return "-";
+  }
+
+  return `${Math.round(voxel.i)}, ${Math.round(voxel.j)}, ${Math.round(voxel.k)}`;
+}
+
+function formatWorld(world: number[] | null) {
+  if (!world || world.length < 3) {
+    return "-";
+  }
+
+  return `${formatNumber(world[0])}, ${formatNumber(world[1])}, ${formatNumber(world[2])}`;
+}
+
+function formatSpacing(source: Extract<CornerstoneViewerSource, { type: "nifti" }>) {
+  const spacing = source.metadata?.spacing;
+
+  if (!spacing?.length) {
+    return undefined;
+  }
+
+  return spacing
+    .slice(0, 3)
+    .map((value) => `${formatNumber(value, 2)} mm`)
+    .join(" x ");
+}
+
+function getPresetOverlayLabel(presetId: WindowPresetId) {
+  const preset = getPreset(presetId);
+
+  return `${preset.id.toUpperCase()} ${preset.level} / ${preset.width}`;
+}
+
+function getClinicalHuValue(
+  value: number,
+  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+) {
+  const sourceType = source.metadata?.source_type?.toLowerCase();
+
+  if (sourceType === "dicom") {
+    return value - 1024;
+  }
+
+  return value;
+}
+
+function readVoxelHu(
+  voxel: VoxelPoint,
+  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+  volumeId: string,
+) {
+  const volume = cache.getVolume(volumeId);
+  const voxelManager = volume?.voxelManager;
+
+  if (!voxelManager?.getAtIJKPoint) {
+    return null;
+  }
+
+  try {
+    const value = voxelManager.getAtIJKPoint([
+      Math.round(voxel.i),
+      Math.round(voxel.j),
+      Math.round(voxel.k),
+    ]);
+
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return null;
+    }
+
+    return Math.round(getClinicalHuValue(value, source));
+  } catch {
+    return null;
+  }
+}
+
 function getSliceLabel(sliceIndex: number, total: number) {
   return `${clampSliceIndex(sliceIndex, total) + 1}/${Math.max(1, total)}`;
+}
+
+function getOrientationLabels(viewportKey: MprViewportKey): OrientationLabelSet {
+  // Fallback convention for the current canonical LPS CT volumes. The affine is
+  // retained for future true orientation derivation once non-canonical inputs are validated.
+  if (viewportKey === "axial") {
+    return { bottom: "P", left: "R", right: "L", top: "A" };
+  }
+
+  if (viewportKey === "sagittal") {
+    return { bottom: "F", left: "P", right: "A", top: "H" };
+  }
+
+  return { bottom: "F", left: "R", right: "L", top: "H" };
 }
 
 function getVoxelCrosshairPosition(
@@ -962,6 +1079,132 @@ function disposeStudyResources({
   }
 }
 
+function CrosshairOverlay({
+  isDragging,
+  position,
+}: {
+  isDragging: boolean;
+  position: CrosshairPosition;
+}) {
+  return (
+    <div className="pointer-events-none absolute inset-0 z-20">
+      <div
+        className={cn(
+          "absolute top-0 w-px bg-cyan-300/75 shadow-[0_0_6px_rgba(34,211,238,0.25)]",
+          isDragging && "bg-cyan-200",
+        )}
+        style={{
+          height: `calc(${position.y * 100}% - 10px)`,
+          left: `${position.x * 100}%`,
+        }}
+      />
+      <div
+        className={cn(
+          "absolute bottom-0 w-px bg-cyan-300/75 shadow-[0_0_6px_rgba(34,211,238,0.25)]",
+          isDragging && "bg-cyan-200",
+        )}
+        style={{
+          left: `${position.x * 100}%`,
+          top: `calc(${position.y * 100}% + 10px)`,
+        }}
+      />
+      <div
+        className={cn(
+          "absolute left-0 h-px bg-cyan-300/75 shadow-[0_0_6px_rgba(34,211,238,0.25)]",
+          isDragging && "bg-cyan-200",
+        )}
+        style={{
+          top: `${position.y * 100}%`,
+          width: `calc(${position.x * 100}% - 10px)`,
+        }}
+      />
+      <div
+        className={cn(
+          "absolute right-0 h-px bg-cyan-300/75 shadow-[0_0_6px_rgba(34,211,238,0.25)]",
+          isDragging && "bg-cyan-200",
+        )}
+        style={{
+          left: `calc(${position.x * 100}% + 10px)`,
+          top: `${position.y * 100}%`,
+        }}
+      />
+      <div
+        className="absolute h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-cyan-200/90 bg-black/40"
+        style={{
+          left: `${position.x * 100}%`,
+          top: `${position.y * 100}%`,
+        }}
+      />
+    </div>
+  );
+}
+
+function OrientationLabels({ labels }: { labels: OrientationLabelSet }) {
+  const baseClass =
+    "pointer-events-none absolute z-20 rounded bg-black/45 px-1.5 py-0.5 text-[10px] font-bold text-cyan-100/90";
+
+  return (
+    <>
+      <span className={cn(baseClass, "left-1/2 top-1 -translate-x-1/2")}>{labels.top}</span>
+      <span className={cn(baseClass, "bottom-1 left-1/2 -translate-x-1/2")}>
+        {labels.bottom}
+      </span>
+      <span className={cn(baseClass, "left-1 top-1/2 -translate-y-1/2")}>{labels.left}</span>
+      <span className={cn(baseClass, "right-1 top-1/2 -translate-y-1/2")}>
+        {labels.right}
+      </span>
+    </>
+  );
+}
+
+function ViewportInfoOverlay({
+  dimensions,
+  isActive,
+  plane,
+  presetLabel,
+  probe,
+  segmentationStatus,
+  sliceLabel,
+  spacingLabel,
+  zoomLabel,
+}: {
+  dimensions?: string;
+  isActive: boolean;
+  plane: string;
+  presetLabel: string;
+  probe: ViewportProbeState | null;
+  segmentationStatus?: string;
+  sliceLabel: string;
+  spacingLabel?: string;
+  zoomLabel?: string;
+}) {
+  return (
+    <div className="pointer-events-none absolute inset-0 z-10 text-[10px] leading-4 text-text-muted">
+      <div className="absolute left-2 top-2 max-w-[45%] rounded bg-black/60 px-2 py-1">
+        <p className="text-[11px] font-semibold text-text">
+          {plane}
+          {isActive ? <span className="ml-2 text-cyan-200">ACTIF</span> : null}
+        </p>
+        <p>Slice {sliceLabel}</p>
+        <p>WL {presetLabel}</p>
+      </div>
+
+      <div className="absolute right-11 top-2 hidden max-w-[42%] rounded bg-black/60 px-2 py-1 text-right xl:block">
+        {dimensions ? <p>{dimensions}</p> : null}
+        {spacingLabel ? <p>{spacingLabel}</p> : null}
+        {zoomLabel ? <p>{zoomLabel}</p> : null}
+        {segmentationStatus ? <p>{segmentationStatus}</p> : null}
+      </div>
+
+      <div className="absolute bottom-2 left-2 max-w-[58%] rounded bg-black/60 px-2 py-1">
+        <p>Voxel {formatVoxel(probe?.voxel || null)}</p>
+        <p>World {formatWorld(probe?.world || null)}</p>
+        <p>HU {probe?.hu == null ? "-" : probe.hu}</p>
+      </div>
+    </div>
+  );
+}
+
 function VolumeRenderingArea({
   actionRequest,
   activePreset,
@@ -1013,6 +1256,9 @@ function VolumeRenderingArea({
   const [isLoading, setIsLoading] = useState(false);
   const [isSceneReady, setIsSceneReady] = useState(false);
   const [maskOverlayStatus, setMaskOverlayStatus] = useState<MaskOverlayStatus>("idle");
+  const [probeByViewportId, setProbeByViewportId] = useState<
+    Record<string, ViewportProbeState | null>
+  >({});
   const [toolMessage, setToolMessage] = useState<string | null>(null);
   const viewportConfigs = useMemo(() => getViewportConfigs(baseViewportId), [baseViewportId]);
   const viewportIds = useMemo(
@@ -1050,9 +1296,18 @@ function VolumeRenderingArea({
   );
 
   const setActiveViewport = useCallback((viewportId: string) => {
+    const viewportKey = getPlaneByViewportId(viewportId, viewportConfigs);
+
     activeViewportIdRef.current = viewportId;
     setActiveViewportId(viewportId);
-  }, []);
+
+    if (viewportKey) {
+      setMprState((currentState) => ({
+        ...currentState,
+        activePlane: viewportKey,
+      }));
+    }
+  }, [viewportConfigs]);
 
   const setViewportElement = useCallback((id: string, element: HTMLDivElement | null) => {
     viewportElementsRef.current[id] = element;
@@ -1102,10 +1357,11 @@ function VolumeRenderingArea({
       const nextVoxel = clampVoxelPoint(voxel, source);
       const nextSliceIndexByPlane = getSliceIndicesFromVoxel(nextVoxel);
 
-      setMprState({
+      setMprState((currentState) => ({
+        ...currentState,
         crosshairVoxel: nextVoxel,
         sliceIndexByPlane: nextSliceIndexByPlane,
-      });
+      }));
       syncMprViewportsToCrosshair(nextSliceIndexByPlane);
       clearHuMeasurement();
       setToolMessage(null);
@@ -1170,6 +1426,50 @@ function VolumeRenderingArea({
       );
     },
     [mprState.crosshairVoxel, source, viewportConfigs],
+  );
+
+  const getViewportProbe = useCallback(
+    (event: PointerEvent<HTMLElement>, viewportId: string): ViewportProbeState | null => {
+      const point = getCanvasPointerPosition(event, viewportElementsRef.current[viewportId]);
+      const viewport =
+        viewportsByIdRef.current[viewportId] || renderingEngineRef.current?.getViewport(viewportId);
+
+      if (!point) {
+        return null;
+      }
+
+      const world = getWorldPoint(viewport, point);
+      const voxel = world ? worldToVoxel(world, source) : null;
+
+      if (!voxel) {
+        return {
+          hu: null,
+          voxel: null,
+          world,
+        };
+      }
+
+      const clampedVoxel = clampVoxelPoint(voxel, source);
+
+      return {
+        hu: readVoxelHu(clampedVoxel, source, volumeId),
+        voxel: clampedVoxel,
+        world,
+      };
+    },
+    [source, volumeId],
+  );
+
+  const updateViewportProbe = useCallback(
+    (event: PointerEvent<HTMLElement>, viewportId: string) => {
+      const probe = getViewportProbe(event, viewportId);
+
+      setProbeByViewportId((currentState) => ({
+        ...currentState,
+        [viewportId]: probe,
+      }));
+    },
+    [getViewportProbe],
   );
 
   const setSliceForViewport = useCallback(
@@ -1255,24 +1555,58 @@ function VolumeRenderingArea({
 
   const handleViewportPointerDown = useCallback(
     (event: PointerEvent<HTMLDivElement>, viewportId: string) => {
+      setActiveViewport(viewportId);
+      updateViewportProbe(event, viewportId);
+
       if (activeToolRef.current === "hu") {
         return;
       }
 
+      setMprState((currentState) => ({
+        ...currentState,
+        isDraggingCrosshair: true,
+      }));
       updateCrosshairPositionFromEvent(event, viewportId);
     },
-    [updateCrosshairPositionFromEvent],
+    [setActiveViewport, updateCrosshairPositionFromEvent, updateViewportProbe],
   );
 
   const handleViewportPointerMove = useCallback(
     (event: PointerEvent<HTMLDivElement>, viewportId: string) => {
+      updateViewportProbe(event, viewportId);
+
       if (activeToolRef.current === "hu" || event.buttons !== 1) {
         return;
       }
 
+      setMprState((currentState) => ({
+        ...currentState,
+        isDraggingCrosshair: true,
+      }));
       updateCrosshairPositionFromEvent(event, viewportId);
     },
-    [updateCrosshairPositionFromEvent],
+    [updateCrosshairPositionFromEvent, updateViewportProbe],
+  );
+
+  const handleViewportPointerUp = useCallback(() => {
+    setMprState((currentState) => ({
+      ...currentState,
+      isDraggingCrosshair: false,
+    }));
+  }, []);
+
+  const handleViewportPointerLeave = useCallback(
+    (viewportId: string) => {
+      setMprState((currentState) => ({
+        ...currentState,
+        isDraggingCrosshair: false,
+      }));
+      setProbeByViewportId((currentState) => ({
+        ...currentState,
+        [viewportId]: null,
+      }));
+    },
+    [],
   );
 
   const finalizeHuCircle = useCallback(
@@ -1495,6 +1829,7 @@ function VolumeRenderingArea({
     const initialMprState = createInitialMprState(source);
 
     setMprState(initialMprState);
+    setProbeByViewportId({});
     syncMprViewportsToCrosshair(initialMprState.sliceIndexByPlane);
   }, [source]);
 
@@ -2116,6 +2451,23 @@ function VolumeRenderingArea({
     },
     [crosshairWorld, mprState.crosshairVoxel, source],
   );
+  const getViewportZoomLabel = useCallback((viewportId: string) => {
+    const viewport = viewportsByIdRef.current[viewportId] as CanvasWorldViewport | undefined;
+
+    if (!viewport?.getZoom) {
+      return undefined;
+    }
+
+    try {
+      const zoom = viewport.getZoom();
+
+      return Number.isFinite(zoom) ? `Zoom ${formatNumber(zoom, 2)}x` : undefined;
+    } catch {
+      return undefined;
+    }
+  }, []);
+  const spacingLabel = formatSpacing(source);
+  const presetOverlayLabel = getPresetOverlayLabel(activePreset);
   const activeViewportConfig =
     viewportConfigs.find((config) => config.id === activeViewportId) ||
     viewportConfigs.find((config) => config.id === activeViewportIdRef.current) ||
@@ -2131,25 +2483,26 @@ function VolumeRenderingArea({
         const sliceTotal = sliceTotals[config.key];
         const sliceIndex = sliceIndices[config.key];
         const crosshairPosition = getCrosshairPositionForViewport(config);
+        const isViewportActive = activeViewportId === config.id;
+        const segmentationStatus =
+          segmentationUrl && maskOverlayStatus !== "idle"
+            ? `Seg ${maskOverlayStatus}`
+            : undefined;
+        const sliceLabel = getSliceLabel(sliceIndex, sliceTotal);
 
         return (
           <ViewportFrame
             className={getViewportGridItemClassName(layout, config.key)}
-            dimensions={getViewportDimensions(source, config.key)}
-            isActive={activeViewportId === config.id}
+            isActive={isViewportActive}
             key={config.id}
             label={config.label}
             onDoubleClick={() => onViewportDoubleClick?.(config.key)}
             onMouseEnter={() => setActiveViewport(config.id)}
             onPointerDown={(event) => handleViewportPointerDown(event, config.id)}
+            onPointerLeave={() => handleViewportPointerLeave(config.id)}
             onPointerMove={(event) => handleViewportPointerMove(event, config.id)}
-            segmentationStatus={
-              segmentationUrl && maskOverlayStatus !== "idle"
-                ? `Seg ${maskOverlayStatus}`
-                : undefined
-            }
-            sliceLabel={getSliceLabel(sliceIndex, sliceTotal)}
-            windowPreset={activePreset}
+            onPointerUp={handleViewportPointerUp}
+            showDefaultOverlay={false}
           >
           <div
             className={cn(
@@ -2159,37 +2512,27 @@ function VolumeRenderingArea({
             onWheel={(event) => handleViewportWheel(event, config.id)}
             ref={(element) => setViewportElement(config.id, element)}
           />
-          {!shouldShowLoading && (layout === "mpr" || activeTool === "crosshair") ? (
-            <div className="pointer-events-none absolute inset-0 z-20">
-              <div
-                className="absolute top-0 w-px bg-primary/80"
-                style={{
-                  height: `calc(${crosshairPosition.y * 100}% - 12px)`,
-                  left: `${crosshairPosition.x * 100}%`,
-                }}
+          {!shouldShowLoading ? (
+            <>
+              <ViewportInfoOverlay
+                dimensions={getViewportDimensions(source, config.key)}
+                isActive={isViewportActive}
+                plane={config.label}
+                presetLabel={presetOverlayLabel}
+                probe={probeByViewportId[config.id] || null}
+                segmentationStatus={segmentationStatus}
+                sliceLabel={sliceLabel}
+                spacingLabel={spacingLabel}
+                zoomLabel={getViewportZoomLabel(config.id)}
               />
-              <div
-                className="absolute bottom-0 w-px bg-primary/80"
-                style={{
-                  left: `${crosshairPosition.x * 100}%`,
-                  top: `calc(${crosshairPosition.y * 100}% + 12px)`,
-                }}
-              />
-              <div
-                className="absolute left-0 h-px bg-primary/80"
-                style={{
-                  top: `${crosshairPosition.y * 100}%`,
-                  width: `calc(${crosshairPosition.x * 100}% - 12px)`,
-                }}
-              />
-              <div
-                className="absolute right-0 h-px bg-primary/80"
-                style={{
-                  left: `calc(${crosshairPosition.x * 100}% + 12px)`,
-                  top: `${crosshairPosition.y * 100}%`,
-                }}
-              />
-            </div>
+              <OrientationLabels labels={getOrientationLabels(config.key)} />
+            </>
+          ) : null}
+          {!shouldShowLoading && activeTool === "crosshair" ? (
+            <CrosshairOverlay
+              isDragging={mprState.isDraggingCrosshair && isViewportActive}
+              position={crosshairPosition}
+            />
           ) : null}
           {activeTool === "hu" ? (
             <div

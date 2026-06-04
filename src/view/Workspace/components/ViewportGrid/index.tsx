@@ -34,6 +34,7 @@ type ViewportFrameProps = HTMLAttributes<HTMLDivElement> & {
   label: string;
   scroller?: ReactNode;
   segmentationStatus?: string;
+  showDefaultOverlay?: boolean;
   sliceLabel?: string;
   windowPreset?: WindowPresetId;
   zoomLabel?: string;
@@ -84,6 +85,7 @@ export function ViewportFrame({
   label,
   scroller,
   segmentationStatus,
+  showDefaultOverlay = true,
   sliceLabel,
   windowPreset,
   zoomLabel,
@@ -98,6 +100,7 @@ export function ViewportFrame({
       )}
       {...props}
     >
+      {showDefaultOverlay ? (
       <div className="pointer-events-none absolute left-2 right-11 top-2 z-10 flex items-start justify-between gap-2">
         <div className="rounded bg-black/65 px-2 py-1 text-[11px] font-semibold leading-4 text-text-soft">
           <span className="text-text">{label}</span>
@@ -111,6 +114,7 @@ export function ViewportFrame({
           {segmentationStatus ? <p>{segmentationStatus}</p> : null}
         </div>
       </div>
+      ) : null}
 
       {children}
 
