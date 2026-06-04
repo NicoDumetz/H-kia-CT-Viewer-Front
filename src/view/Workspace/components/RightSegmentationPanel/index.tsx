@@ -120,7 +120,7 @@ function HuMeasurementSummary({
     <p className="text-xs leading-relaxed text-text-muted">
       {activeTool === "hu"
         ? "Cliquez dans une vue pour placer la ROI HU."
-        : "Activez l'outil HU ROI depuis la toolbar."}
+        : "HU ROI à venir. Les outils actifs sont scroll, window/level, pan, zoom, crosshair et reset."}
     </p>
   );
 }

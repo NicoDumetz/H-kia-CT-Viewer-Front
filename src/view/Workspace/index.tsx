@@ -270,6 +270,8 @@ function getCrosshairTargetFromLabel(
       coronal: centerIjk[1],
       sagittal: centerIjk[0],
     },
+    voxel: centerIjk,
+    world: label.centerWorld || undefined,
     x: Math.max(0, Math.min(1, centerIjk[0] / maxX)),
     y: Math.max(0, Math.min(1, centerIjk[1] / maxY)),
   };
@@ -330,6 +332,20 @@ function MedicalViewerShell({
   );
   const isReady = Boolean(cornerstoneSource);
   const unavailableMessage = getUnavailableViewerMessage(inputType);
+
+  useEffect(() => {
+    if (!import.meta.env.DEV || cornerstoneSource?.type !== "nifti") {
+      return;
+    }
+
+    console.debug("[Workspace viewer source]", {
+      preset: windowPreset,
+      shape: cornerstoneSource.metadata?.shape,
+      sourceType: cornerstoneSource.metadata?.source_type,
+      studyId,
+      volumeUrl: cornerstoneSource.url,
+    });
+  }, [cornerstoneSource, studyId, windowPreset]);
 
   if (!isReady) {
     const showFailure = Boolean(error) && !isBusy;
@@ -414,6 +430,7 @@ export default function Workspace() {
   const [maskOpacity, setMaskOpacity] = useState(0.6);
   const [error, setError] = useState<string | null>(null);
   const autoPreparedStudyIdsRef = useRef<Set<string>>(new Set());
+  const loadRequestIdRef = useRef(0);
 
   const loadWorkspace = useCallback(
     async (showLoading = false) => {
@@ -427,11 +444,19 @@ export default function Workspace() {
         setIsLoading(true);
       }
 
+      const loadRequestId = loadRequestIdRef.current + 1;
+      loadRequestIdRef.current = loadRequestId;
+
       try {
         const [workspaceResponse, studiesResponse] = await Promise.all([
           WorkspaceApi.getWorkspace(studyId),
           Studies.getStudies(),
         ]);
+
+        if (loadRequestId !== loadRequestIdRef.current) {
+          return;
+        }
+
         const nextWorkspace = workspaceResponse.data;
         const nextViewer = normalizeViewer(nextWorkspace.viewer);
         const nextVolume = nextWorkspace.volume.data;
@@ -442,9 +467,15 @@ export default function Workspace() {
         setVolume(nextVolume);
         setError(null);
       } catch (loadError) {
+        if (loadRequestId !== loadRequestIdRef.current) {
+          return;
+        }
+
         setError(getErrorMessage(loadError));
       } finally {
-        setIsLoading(false);
+        if (loadRequestId === loadRequestIdRef.current) {
+          setIsLoading(false);
+        }
       }
     },
     [studyId],

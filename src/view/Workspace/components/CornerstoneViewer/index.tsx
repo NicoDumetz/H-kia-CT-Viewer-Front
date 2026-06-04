@@ -65,6 +65,8 @@ export type HuMeasurementPanelState =
 
 export type ViewerCrosshairTarget = {
   sliceIndices?: Partial<Record<"axial" | "sagittal" | "coronal", number>>;
+  voxel?: number[];
+  world?: number[];
   x: number;
   y: number;
 };

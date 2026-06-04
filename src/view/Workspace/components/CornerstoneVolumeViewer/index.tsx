@@ -16,9 +16,11 @@
 // =============================================================
 
 import {
+  cache,
   Enums,
   RenderingEngine,
   setVolumesForViewports,
+  utilities as cornerstoneUtilities,
   volumeLoader,
 } from "@cornerstonejs/core";
 import type { Types } from "@cornerstonejs/core";
@@ -64,6 +66,7 @@ import {
   cornerstoneToolGroupId,
   createNiftiImageIds,
   initCornerstone,
+  releaseDecompressedNiftiUrl,
 } from "~/helpers/Cornerstone";
 import { cn } from "~/helpers/Cn";
 import type {
@@ -94,10 +97,6 @@ type VoiViewport = Types.IViewport & {
   setProperties?: (properties: { voiRange: { lower: number; upper: number } }) => void;
 };
 
-type ScrollableViewport = Types.IViewport & {
-  scroll?: (delta: number) => void;
-};
-
 type ResettableViewport = Types.IViewport & {
   resetCamera?: (options?: {
     resetPan?: boolean;
@@ -110,6 +109,19 @@ type ResettableViewport = Types.IViewport & {
 type CrosshairPosition = {
   x: number;
   y: number;
+};
+
+type VoxelPoint = {
+  i: number;
+  j: number;
+  k: number;
+};
+
+type SliceIndexByPlane = Record<MprViewportKey, number>;
+
+type MprState = {
+  crosshairVoxel: VoxelPoint;
+  sliceIndexByPlane: SliceIndexByPlane;
 };
 
 type CanvasPoint = {
@@ -189,8 +201,8 @@ const windowPresets: WindowPreset[] = [
   {
     id: "bone",
     label: "Bone",
-    width: 2000,
-    level: 500,
+    width: 1500,
+    level: 300,
   },
   {
     id: "lung",
@@ -217,12 +229,18 @@ const toolNameByViewerTool: Partial<Record<ViewerTool, string>> = {
   zoom: ZoomTool.toolName,
 };
 
-function getVoiRange(preset: WindowPreset) {
+function getDisplayVoiRange(
+  preset: WindowPreset,
+  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+) {
+  const sourceType = source.metadata?.source_type?.toLowerCase();
+  const rawLevelOffset = sourceType === "dicom" ? 1024 : 0;
   const halfWidth = preset.width / 2;
+  const displayLevel = preset.level + rawLevelOffset;
 
   return {
-    lower: preset.level - halfWidth,
-    upper: preset.level + halfWidth,
+    lower: displayLevel - halfWidth,
+    upper: displayLevel + halfWidth,
   };
 }
 
@@ -279,6 +297,56 @@ function getInitialSliceIndices(source: Extract<CornerstoneViewerSource, { type:
   };
 }
 
+function getVolumeShape(source: Extract<CornerstoneViewerSource, { type: "nifti" }>) {
+  const shape = source.metadata?.shape || [];
+
+  return {
+    i: Math.max(1, shape[0] || 1),
+    j: Math.max(1, shape[1] || 1),
+    k: Math.max(1, shape[2] || 1),
+  };
+}
+
+function getVoxelFromSliceIndices(sliceIndices: SliceIndexByPlane): VoxelPoint {
+  return {
+    i: sliceIndices.sagittal,
+    j: sliceIndices.coronal,
+    k: sliceIndices.axial,
+  };
+}
+
+function getSliceIndicesFromVoxel(voxel: VoxelPoint): SliceIndexByPlane {
+  return {
+    axial: Math.round(voxel.k),
+    coronal: Math.round(voxel.j),
+    sagittal: Math.round(voxel.i),
+  };
+}
+
+function clampVoxelPoint(
+  voxel: VoxelPoint,
+  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+): VoxelPoint {
+  const shape = getVolumeShape(source);
+
+  return {
+    i: clampSliceIndex(Math.round(voxel.i), shape.i),
+    j: clampSliceIndex(Math.round(voxel.j), shape.j),
+    k: clampSliceIndex(Math.round(voxel.k), shape.k),
+  };
+}
+
+function createInitialMprState(
+  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+): MprState {
+  const sliceIndexByPlane = getInitialSliceIndices(source);
+
+  return {
+    crosshairVoxel: getVoxelFromSliceIndices(sliceIndexByPlane),
+    sliceIndexByPlane,
+  };
+}
+
 function clampSliceIndex(value: number, total: number) {
   return Math.max(0, Math.min(Math.max(0, total - 1), value));
 }
@@ -304,7 +372,153 @@ function getSliceLabel(sliceIndex: number, total: number) {
   return `${clampSliceIndex(sliceIndex, total) + 1}/${Math.max(1, total)}`;
 }
 
-function applyWindowPreset(viewports: Types.IViewport[], presetId: WindowPresetId) {
+function getVoxelCrosshairPosition(
+  voxel: VoxelPoint,
+  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+  viewportKey: MprViewportKey,
+): CrosshairPosition {
+  const shape = getVolumeShape(source);
+
+  if (viewportKey === "axial") {
+    return {
+      x: clamp(voxel.i / Math.max(1, shape.i - 1)),
+      y: clamp(voxel.j / Math.max(1, shape.j - 1)),
+    };
+  }
+
+  if (viewportKey === "sagittal") {
+    return {
+      x: clamp(voxel.j / Math.max(1, shape.j - 1)),
+      y: clamp(voxel.k / Math.max(1, shape.k - 1)),
+    };
+  }
+
+  return {
+    x: clamp(voxel.i / Math.max(1, shape.i - 1)),
+    y: clamp(voxel.k / Math.max(1, shape.k - 1)),
+  };
+}
+
+function getFallbackAffine(source: Extract<CornerstoneViewerSource, { type: "nifti" }>) {
+  const origin = source.metadata?.origin || [0, 0, 0];
+  const spacing = source.metadata?.spacing || [1, 1, 1];
+  const direction = source.metadata?.direction || [1, 0, 0, 0, 1, 0, 0, 0, 1];
+
+  return [
+    [
+      (direction[0] || 0) * (spacing[0] || 1),
+      (direction[1] || 0) * (spacing[1] || 1),
+      (direction[2] || 0) * (spacing[2] || 1),
+      origin[0] || 0,
+    ],
+    [
+      (direction[3] || 0) * (spacing[0] || 1),
+      (direction[4] || 0) * (spacing[1] || 1),
+      (direction[5] || 0) * (spacing[2] || 1),
+      origin[1] || 0,
+    ],
+    [
+      (direction[6] || 0) * (spacing[0] || 1),
+      (direction[7] || 0) * (spacing[1] || 1),
+      (direction[8] || 0) * (spacing[2] || 1),
+      origin[2] || 0,
+    ],
+  ];
+}
+
+function getVolumeAffine(source: Extract<CornerstoneViewerSource, { type: "nifti" }>) {
+  const affine = source.metadata?.affine;
+
+  if (
+    affine &&
+    affine.length >= 3 &&
+    affine[0]?.length >= 4 &&
+    affine[1]?.length >= 4 &&
+    affine[2]?.length >= 4
+  ) {
+    return affine;
+  }
+
+  return getFallbackAffine(source);
+}
+
+function invert3x3(matrix: number[][]) {
+  const a = matrix[0]?.[0] || 0;
+  const b = matrix[0]?.[1] || 0;
+  const c = matrix[0]?.[2] || 0;
+  const d = matrix[1]?.[0] || 0;
+  const e = matrix[1]?.[1] || 0;
+  const f = matrix[1]?.[2] || 0;
+  const g = matrix[2]?.[0] || 0;
+  const h = matrix[2]?.[1] || 0;
+  const i = matrix[2]?.[2] || 0;
+  const determinant = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+
+  if (!determinant) {
+    return null;
+  }
+
+  const invDet = 1 / determinant;
+
+  return [
+    [(e * i - f * h) * invDet, (c * h - b * i) * invDet, (b * f - c * e) * invDet],
+    [(f * g - d * i) * invDet, (a * i - c * g) * invDet, (c * d - a * f) * invDet],
+    [(d * h - e * g) * invDet, (b * g - a * h) * invDet, (a * e - b * d) * invDet],
+  ];
+}
+
+function voxelToWorld(
+  voxel: VoxelPoint,
+  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+): Types.Point3 {
+  const affine = getVolumeAffine(source);
+  const values = [voxel.i, voxel.j, voxel.k];
+
+  return [0, 1, 2].map((row) => {
+    const affineRow = affine[row] || [];
+
+    return (
+      (affineRow[0] || 0) * values[0] +
+      (affineRow[1] || 0) * values[1] +
+      (affineRow[2] || 0) * values[2] +
+      (affineRow[3] || 0)
+    );
+  }) as Types.Point3;
+}
+
+function worldToVoxel(
+  world: number[],
+  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+): VoxelPoint | null {
+  const affine = getVolumeAffine(source);
+  const inverse = invert3x3([
+    [affine[0]?.[0] || 0, affine[0]?.[1] || 0, affine[0]?.[2] || 0],
+    [affine[1]?.[0] || 0, affine[1]?.[1] || 0, affine[1]?.[2] || 0],
+    [affine[2]?.[0] || 0, affine[2]?.[1] || 0, affine[2]?.[2] || 0],
+  ]);
+
+  if (!inverse) {
+    return null;
+  }
+
+  const translated = [
+    world[0] - (affine[0]?.[3] || 0),
+    world[1] - (affine[1]?.[3] || 0),
+    world[2] - (affine[2]?.[3] || 0),
+  ];
+
+  return {
+    i: inverse[0][0] * translated[0] + inverse[0][1] * translated[1] + inverse[0][2] * translated[2],
+    j: inverse[1][0] * translated[0] + inverse[1][1] * translated[1] + inverse[1][2] * translated[2],
+    k: inverse[2][0] * translated[0] + inverse[2][1] * translated[1] + inverse[2][2] * translated[2],
+  };
+}
+
+function applyWindowPreset(
+  viewports: Types.IViewport[],
+  presetId: WindowPresetId,
+  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+) {
   const preset = getPreset(presetId);
 
   viewports.forEach((viewport) => {
@@ -315,7 +529,7 @@ function applyWindowPreset(viewports: Types.IViewport[], presetId: WindowPresetI
     }
 
     voiViewport.setProperties({
-      voiRange: getVoiRange(preset),
+      voiRange: getDisplayVoiRange(preset, source),
     });
     viewport.render();
   });
@@ -689,6 +903,65 @@ function setMaskOpacity(viewportIds: string[], segmentationId: string, opacity: 
   });
 }
 
+function removeCachedVolumeQuietly(volumeId: string) {
+  try {
+    if (cache.getVolume(volumeId) || cache.getVolumeLoadObject(volumeId)) {
+      cache.removeVolumeLoadObject(volumeId);
+    }
+  } catch {
+    // Cache entries may already be gone while a study is switching.
+  }
+}
+
+function disposeStudyResources({
+  renderingEngine,
+  segmentationId,
+  segmentationVolumeId,
+  segmentationUrl,
+  sourceUrl,
+  toolGroupId,
+  volumeId,
+}: {
+  renderingEngine: RenderingEngine | null;
+  segmentationId: string;
+  segmentationVolumeId: string;
+  segmentationUrl?: string | null;
+  sourceUrl: string;
+  toolGroupId: string;
+  volumeId: string;
+}) {
+  removeSegmentationQuietly(segmentationId);
+
+  try {
+    ToolGroupManager.destroyToolGroup(toolGroupId);
+  } catch {
+    // ToolGroup can already be destroyed by Cornerstone internals.
+  }
+
+  try {
+    renderingEngine?.destroy();
+  } catch {
+    // Destroy may race with route switches.
+  }
+
+  removeCachedVolumeQuietly(segmentationVolumeId);
+  removeCachedVolumeQuietly(volumeId);
+  releaseDecompressedNiftiUrl(sourceUrl);
+
+  if (segmentationUrl) {
+    releaseDecompressedNiftiUrl(segmentationUrl);
+  }
+
+  if (import.meta.env.DEV) {
+    console.debug("[Cornerstone cleanup]", {
+      segmentationId,
+      segmentationVolumeId,
+      toolGroupId,
+      volumeId,
+    });
+  }
+}
+
 function VolumeRenderingArea({
   actionRequest,
   activePreset,
@@ -733,17 +1006,13 @@ function VolumeRenderingArea({
   const handledActionRequestIdRef = useRef<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeViewportId, setActiveViewportId] = useState<string | null>(null);
-  const [crosshairPosition, setCrosshairPosition] = useState<CrosshairPosition>({
-    x: 0.5,
-    y: 0.5,
-  });
+  const [mprState, setMprState] = useState(() => createInitialMprState(source));
   const [huCircleDraft, setHuCircleDraft] = useState<HuCircleDraft | null>(null);
   const [huResult, setHuResult] = useState<HuCircleMeasurement | null>(null);
   const [isHuLoading, setIsHuLoading] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isSceneReady, setIsSceneReady] = useState(false);
   const [maskOverlayStatus, setMaskOverlayStatus] = useState<MaskOverlayStatus>("idle");
-  const [sliceIndices, setSliceIndices] = useState(() => getInitialSliceIndices(source));
   const [toolMessage, setToolMessage] = useState<string | null>(null);
   const viewportConfigs = useMemo(() => getViewportConfigs(baseViewportId), [baseViewportId]);
   const viewportIds = useMemo(
@@ -757,6 +1026,11 @@ function VolumeRenderingArea({
       sagittal: getSliceTotal(source, "sagittal"),
     }),
     [source],
+  );
+  const sliceIndices = mprState.sliceIndexByPlane;
+  const crosshairWorld = useMemo(
+    () => voxelToWorld(mprState.crosshairVoxel, source),
+    [mprState.crosshairVoxel, source],
   );
 
   const clearHuMeasurement = useCallback(() => {
@@ -789,52 +1063,116 @@ function VolumeRenderingArea({
     }
   }, []);
 
-  const scrollViewport = useCallback(
-    (viewportId: string, delta: number) => {
+  const syncMprViewportsToCrosshair = useCallback(
+    (sliceIndexByPlane: SliceIndexByPlane) => {
+      if (!isRenderingReadyRef.current) {
+        return;
+      }
+
+      viewportConfigs.forEach((config) => {
+        const element = viewportElementsRef.current[config.id];
+
+        if (!element) {
+          return;
+        }
+
+        void cornerstoneUtilities
+          .jumpToSlice(element, {
+            debounceLoading: true,
+            imageIndex: sliceIndexByPlane[config.key],
+            volumeId,
+          })
+          .then(() => {
+            viewportsByIdRef.current[config.id]?.render();
+          })
+          .catch((syncError) => {
+            if (import.meta.env.DEV) {
+              console.warn("[Cornerstone MPR sync]", syncError);
+            }
+          });
+      });
+
+      renderingEngineRef.current?.renderViewports(viewportIds);
+    },
+    [viewportConfigs, viewportIds, volumeId],
+  );
+
+  const applyMprVoxel = useCallback(
+    (voxel: VoxelPoint) => {
+      const nextVoxel = clampVoxelPoint(voxel, source);
+      const nextSliceIndexByPlane = getSliceIndicesFromVoxel(nextVoxel);
+
+      setMprState({
+        crosshairVoxel: nextVoxel,
+        sliceIndexByPlane: nextSliceIndexByPlane,
+      });
+      syncMprViewportsToCrosshair(nextSliceIndexByPlane);
+      clearHuMeasurement();
+      setToolMessage(null);
+    },
+    [clearHuMeasurement, source, syncMprViewportsToCrosshair],
+  );
+
+  const getViewportClickVoxel = useCallback(
+    (event: PointerEvent<HTMLElement>, viewportId: string): VoxelPoint | null => {
+      const point = getCanvasPointerPosition(event, viewportElementsRef.current[viewportId]);
       const viewport =
         viewportsByIdRef.current[viewportId] || renderingEngineRef.current?.getViewport(viewportId);
-      const scrollableViewport = viewport as ScrollableViewport | undefined;
+
+      if (point) {
+        const worldPoint = getWorldPoint(viewport, point);
+        const voxelPoint = worldPoint ? worldToVoxel(worldPoint, source) : null;
+
+        if (voxelPoint) {
+          return clampVoxelPoint(voxelPoint, source);
+        }
+      }
+
+      const position = getRelativePointerPosition(event, viewportElementsRef.current[viewportId]);
       const viewportKey = getPlaneByViewportId(viewportId, viewportConfigs);
 
-      if (!delta || !scrollableViewport?.scroll || !viewportKey) {
-        return;
+      if (!position || !viewportKey) {
+        return null;
       }
 
-      try {
-        scrollableViewport.scroll(delta);
-        scrollableViewport.render();
-        setSliceIndices((currentIndices) => ({
-          ...currentIndices,
-          [viewportKey]: clampSliceIndex(
-            currentIndices[viewportKey] + delta,
-            sliceTotals[viewportKey],
-          ),
-        }));
-        clearHuMeasurement();
-        setToolMessage(null);
-      } catch {
-        // Some Cornerstone viewport implementations do not expose local scroll.
+      const shape = getVolumeShape(source);
+      const currentVoxel = mprState.crosshairVoxel;
+
+      if (viewportKey === "axial") {
+        return clampVoxelPoint(
+          {
+            i: position.x * (shape.i - 1),
+            j: position.y * (shape.j - 1),
+            k: currentVoxel.k,
+          },
+          source,
+        );
       }
+
+      if (viewportKey === "sagittal") {
+        return clampVoxelPoint(
+          {
+            i: currentVoxel.i,
+            j: position.x * (shape.j - 1),
+            k: position.y * (shape.k - 1),
+          },
+          source,
+        );
+      }
+
+      return clampVoxelPoint(
+        {
+          i: position.x * (shape.i - 1),
+          j: currentVoxel.j,
+          k: position.y * (shape.k - 1),
+        },
+        source,
+      );
     },
-    [clearHuMeasurement, sliceTotals, viewportConfigs],
+    [mprState.crosshairVoxel, source, viewportConfigs],
   );
 
-  const handleViewportWheel = useCallback(
-    (event: WheelEvent<HTMLDivElement>, viewportId: string) => {
-      const delta = event.deltaY > 0 ? 1 : event.deltaY < 0 ? -1 : 0;
-
-      if (!delta) {
-        return;
-      }
-
-      event.preventDefault();
-      setActiveViewport(viewportId);
-      scrollViewport(viewportId, delta);
-    },
-    [scrollViewport, setActiveViewport],
-  );
-
-  const handleSliceScrollChange = useCallback(
+  const setSliceForViewport = useCallback(
     (viewportId: string, nextSliceIndex: number) => {
       const viewportKey = getPlaneByViewportId(viewportId, viewportConfigs);
 
@@ -842,32 +1180,77 @@ function VolumeRenderingArea({
         return;
       }
 
-      const currentSliceIndex = sliceIndices[viewportKey];
-      const delta = clampSliceIndex(nextSliceIndex, sliceTotals[viewportKey]) - currentSliceIndex;
+      const nextVoxel = { ...mprState.crosshairVoxel };
+      const clampedSliceIndex = clampSliceIndex(nextSliceIndex, sliceTotals[viewportKey]);
 
-      setActiveViewport(viewportId);
+      if (viewportKey === "axial") {
+        nextVoxel.k = clampedSliceIndex;
+      } else if (viewportKey === "sagittal") {
+        nextVoxel.i = clampedSliceIndex;
+      } else {
+        nextVoxel.j = clampedSliceIndex;
+      }
 
-      if (!delta) {
+      applyMprVoxel(nextVoxel);
+    },
+    [applyMprVoxel, mprState.crosshairVoxel, sliceTotals, viewportConfigs],
+  );
+
+  const handleViewportWheel = useCallback(
+    (event: WheelEvent<HTMLDivElement>, viewportId: string) => {
+      const delta = event.deltaY > 0 ? 1 : event.deltaY < 0 ? -1 : 0;
+
+      if (!delta || isLoading || !isSceneReady) {
         return;
       }
 
-      scrollViewport(viewportId, delta);
+      const viewportKey = getPlaneByViewportId(viewportId, viewportConfigs);
+
+      if (!viewportKey) {
+        return;
+      }
+
+      event.preventDefault();
+      setActiveViewport(viewportId);
+      setSliceForViewport(viewportId, sliceIndices[viewportKey] + delta);
     },
-    [scrollViewport, setActiveViewport, sliceIndices, sliceTotals, viewportConfigs],
+    [
+      isLoading,
+      isSceneReady,
+      setActiveViewport,
+      setSliceForViewport,
+      sliceIndices,
+      viewportConfigs,
+    ],
+  );
+
+  const handleSliceScrollChange = useCallback(
+    (viewportId: string, nextSliceIndex: number) => {
+      if (isLoading || !isSceneReady) {
+        return;
+      }
+      setActiveViewport(viewportId);
+      setSliceForViewport(viewportId, nextSliceIndex);
+    },
+    [isLoading, isSceneReady, setActiveViewport, setSliceForViewport],
   );
 
   const updateCrosshairPositionFromEvent = useCallback(
     (event: PointerEvent<HTMLElement>, viewportId: string) => {
-      const position = getRelativePointerPosition(event, viewportElementsRef.current[viewportId]);
+      if (isLoading || !isSceneReady) {
+        return;
+      }
 
-      if (!position) {
+      const voxel = getViewportClickVoxel(event, viewportId);
+
+      if (!voxel) {
         return;
       }
 
       setActiveViewport(viewportId);
-      setCrosshairPosition(position);
+      applyMprVoxel(voxel);
     },
-    [setActiveViewport],
+    [applyMprVoxel, getViewportClickVoxel, isLoading, isSceneReady, setActiveViewport],
   );
 
   const handleViewportPointerDown = useCallback(
@@ -955,7 +1338,6 @@ function VolumeRenderingArea({
       event.stopPropagation();
       setActiveViewport(viewportId);
       setToolMessage(null);
-      setCrosshairPosition(getRelativePointerPosition(event, viewportElementsRef.current[viewportId]) || crosshairPosition);
       const currentDraft = huCircleDraftRef.current;
 
       if (currentDraft && !currentDraft.isFinalized && currentDraft.viewportId === viewportId) {
@@ -987,7 +1369,7 @@ function VolumeRenderingArea({
       setHuResult(null);
       onHuMeasurementChange?.({ status: "draft" });
     },
-    [crosshairPosition, finalizeHuCircle, onHuMeasurementChange, setActiveViewport, viewportConfigs],
+    [finalizeHuCircle, onHuMeasurementChange, setActiveViewport, viewportConfigs],
   );
 
   const handleHuPointerMove = useCallback(
@@ -1032,18 +1414,27 @@ function VolumeRenderingArea({
       });
 
       resettableViewport.setProperties?.({
-        voiRange: getVoiRange(preset),
+        voiRange: getDisplayVoiRange(preset, source),
       });
 
       viewport.render();
     });
 
-    setCrosshairPosition({ x: 0.5, y: 0.5 });
+    const initialMprState = createInitialMprState(source);
+
+    setMprState(initialMprState);
+    syncMprViewportsToCrosshair(initialMprState.sliceIndexByPlane);
     clearHuMeasurement();
     setToolMessage(null);
     onPresetChange(preset.id);
     onActiveToolChange?.("crosshair");
-  }, [clearHuMeasurement, onActiveToolChange, onPresetChange]);
+  }, [
+    clearHuMeasurement,
+    onActiveToolChange,
+    onPresetChange,
+    source,
+    syncMprViewportsToCrosshair,
+  ]);
 
   const captureActiveViewport = useCallback(() => {
     const activeElement = activeViewportIdRef.current
@@ -1097,11 +1488,14 @@ function VolumeRenderingArea({
 
   useEffect(() => {
     activePresetRef.current = activePreset;
-    applyWindowPreset(viewportsRef.current, activePreset);
-  }, [activePreset]);
+    applyWindowPreset(viewportsRef.current, activePreset, source);
+  }, [activePreset, source]);
 
   useEffect(() => {
-    setSliceIndices(getInitialSliceIndices(source));
+    const initialMprState = createInitialMprState(source);
+
+    setMprState(initialMprState);
+    syncMprViewportsToCrosshair(initialMprState.sliceIndexByPlane);
   }, [source]);
 
   useEffect(() => {
@@ -1159,33 +1553,42 @@ function VolumeRenderingArea({
       return;
     }
 
-    setCrosshairPosition({
-      x: clamp(crosshairTarget.x),
-      y: clamp(crosshairTarget.y),
-    });
+    if (crosshairTarget.world?.length && crosshairTarget.world.length >= 3) {
+      const voxel = worldToVoxel(crosshairTarget.world, source);
 
-    if (!crosshairTarget.sliceIndices) {
+      if (voxel) {
+        applyMprVoxel(voxel);
+        return;
+      }
+    }
+
+    if (crosshairTarget.voxel?.length && crosshairTarget.voxel.length >= 3) {
+      applyMprVoxel({
+        i: crosshairTarget.voxel[0],
+        j: crosshairTarget.voxel[1],
+        k: crosshairTarget.voxel[2],
+      });
       return;
     }
 
-    viewportConfigs.forEach((config) => {
-      const nextSliceIndex = crosshairTarget.sliceIndices?.[config.key];
+    if (crosshairTarget.sliceIndices) {
+      applyMprVoxel(
+        getVoxelFromSliceIndices({
+          ...sliceIndices,
+          ...crosshairTarget.sliceIndices,
+        }),
+      );
+      return;
+    }
 
-      if (typeof nextSliceIndex !== "number") {
-        return;
-      }
+    const shape = getVolumeShape(source);
 
-      const total = sliceTotals[config.key];
-      const currentSliceIndex = sliceIndices[config.key];
-      const delta = clampSliceIndex(nextSliceIndex, total) - currentSliceIndex;
-
-      if (!delta) {
-        return;
-      }
-
-      scrollViewport(config.id, delta);
+    applyMprVoxel({
+      i: clamp(crosshairTarget.x) * (shape.i - 1),
+      j: clamp(crosshairTarget.y) * (shape.j - 1),
+      k: mprState.crosshairVoxel.k,
     });
-  }, [crosshairTarget, scrollViewport, sliceIndices, sliceTotals, viewportConfigs]);
+  }, [applyMprVoxel, crosshairTarget, mprState.crosshairVoxel.k, sliceIndices, source]);
 
   useEffect(() => {
     const nextViewportId = getLayoutViewportId(layout, viewportConfigs);
@@ -1331,7 +1734,13 @@ function VolumeRenderingArea({
       renderingEngineRef.current = null;
       viewportsRef.current = [];
       viewportsByIdRef.current = {};
-      ToolGroupManager.destroyToolGroup(toolGroupId);
+      removeSegmentationQuietly(segmentationId);
+
+      try {
+        ToolGroupManager.destroyToolGroup(toolGroupId);
+      } catch {
+        // ToolGroup may be absent during first mount.
+      }
 
       try {
         await initCornerstone();
@@ -1391,9 +1800,16 @@ function VolumeRenderingArea({
         await volume.load();
 
         if (isCancelled || setupToken !== setupTokenRef.current) {
-          renderingEngine.destroy();
+          disposeStudyResources({
+            renderingEngine,
+            segmentationId,
+            segmentationVolumeId,
+            segmentationUrl: null,
+            sourceUrl: source.url,
+            toolGroupId,
+            volumeId,
+          });
           renderingEngine = null;
-          ToolGroupManager.destroyToolGroup(toolGroupId);
           return;
         }
 
@@ -1419,7 +1835,7 @@ function VolumeRenderingArea({
         isRenderingReadyRef.current = true;
         viewportInputs.forEach((input) => resizeObserver.observe(input.element));
 
-        applyWindowPreset(nextViewports, activePresetRef.current);
+        applyWindowPreset(nextViewports, activePresetRef.current, source);
         renderingEngine.resize(true, false);
         renderingEngine.renderViewports(viewportIds);
 
@@ -1432,12 +1848,19 @@ function VolumeRenderingArea({
         resizeObserver.disconnect();
         isRenderingReadyRef.current = false;
         isMaskOverlayLoadedRef.current = false;
-        renderingEngine?.destroy();
+        disposeStudyResources({
+          renderingEngine,
+          segmentationId,
+          segmentationVolumeId,
+          segmentationUrl: null,
+          sourceUrl: source.url,
+          toolGroupId,
+          volumeId,
+        });
         renderingEngine = null;
         renderingEngineRef.current = null;
         viewportsRef.current = [];
         viewportsByIdRef.current = {};
-        ToolGroupManager.destroyToolGroup(toolGroupId);
         updateMaskOverlayStatus("idle");
 
         if (!isCancelled && setupToken === setupTokenRef.current) {
@@ -1462,16 +1885,24 @@ function VolumeRenderingArea({
       isRenderingReadyRef.current = false;
       isMaskOverlayLoadedRef.current = false;
       resizeObserver.disconnect();
-      renderingEngine?.destroy();
-      renderingEngineRef.current?.destroy();
+      disposeStudyResources({
+        renderingEngine: renderingEngine || renderingEngineRef.current,
+        segmentationId,
+        segmentationVolumeId,
+        segmentationUrl: null,
+        sourceUrl: source.url,
+        toolGroupId,
+        volumeId,
+      });
       renderingEngineRef.current = null;
       viewportsRef.current = [];
       viewportsByIdRef.current = {};
-      ToolGroupManager.destroyToolGroup(toolGroupId);
       updateMaskOverlayStatus("idle");
     };
   }, [
     renderingEngineId,
+    segmentationId,
+    segmentationVolumeId,
     source.url,
     toolGroupId,
     updateMaskOverlayStatus,
@@ -1484,6 +1915,7 @@ function VolumeRenderingArea({
     if (!segmentationUrl) {
       isMaskOverlayLoadedRef.current = false;
       removeSegmentationQuietly(segmentationId);
+      removeCachedVolumeQuietly(segmentationVolumeId);
       updateMaskOverlayStatus("idle");
       return;
     }
@@ -1518,6 +1950,8 @@ function VolumeRenderingArea({
         await segmentationVolume.load();
 
         if (isCancelled) {
+          removeCachedVolumeQuietly(segmentationVolumeId);
+          releaseDecompressedNiftiUrl(currentSegmentationUrl);
           return;
         }
 
@@ -1566,6 +2000,7 @@ function VolumeRenderingArea({
       } catch (overlayError) {
         isMaskOverlayLoadedRef.current = false;
         removeSegmentationQuietly(segmentationId);
+        removeCachedVolumeQuietly(segmentationVolumeId);
         updateMaskOverlayStatus("unavailable");
 
         if (import.meta.env.DEV) {
@@ -1580,6 +2015,8 @@ function VolumeRenderingArea({
       isCancelled = true;
       isMaskOverlayLoadedRef.current = false;
       removeSegmentationQuietly(segmentationId);
+      removeCachedVolumeQuietly(segmentationVolumeId);
+      releaseDecompressedNiftiUrl(currentSegmentationUrl);
     };
   }, [
     isSceneReady,
@@ -1652,12 +2089,48 @@ function VolumeRenderingArea({
   }, [maskOpacity, segmentationId, segmentationUrl, updateMaskOverlayStatus, viewportIds]);
 
   const shouldShowLoading = !error && (isLoading || !isSceneReady);
+  const getCrosshairPositionForViewport = useCallback(
+    (config: ViewportConfig): CrosshairPosition => {
+      const viewport = viewportsByIdRef.current[config.id] as CanvasWorldViewport | undefined;
+      const element = viewportElementsRef.current[config.id];
+
+      if (viewport?.worldToCanvas && element?.clientWidth && element.clientHeight) {
+        try {
+          const canvasPosition = viewport.worldToCanvas(crosshairWorld);
+
+          if (
+            Number.isFinite(canvasPosition[0]) &&
+            Number.isFinite(canvasPosition[1])
+          ) {
+            return {
+              x: clamp(canvasPosition[0] / element.clientWidth),
+              y: clamp(canvasPosition[1] / element.clientHeight),
+            };
+          }
+        } catch {
+          // Fallback to voxel-normalized coordinates below.
+        }
+      }
+
+      return getVoxelCrosshairPosition(mprState.crosshairVoxel, source, config.key);
+    },
+    [crosshairWorld, mprState.crosshairVoxel, source],
+  );
+  const activeViewportConfig =
+    viewportConfigs.find((config) => config.id === activeViewportId) ||
+    viewportConfigs.find((config) => config.id === activeViewportIdRef.current) ||
+    viewportConfigs[0];
+  const activeScrollerViewportId = activeViewportConfig?.id || viewportIds[0] || "";
+  const activeScrollerKey = activeViewportConfig?.key || "axial";
+  const activeScrollerSlice = sliceIndices[activeScrollerKey];
+  const activeScrollerTotal = sliceTotals[activeScrollerKey];
 
   return (
     <div className="contents" ref={containerRef}>
       {viewportConfigs.map((config) => {
         const sliceTotal = sliceTotals[config.key];
         const sliceIndex = sliceIndices[config.key];
+        const crosshairPosition = getCrosshairPositionForViewport(config);
 
         return (
           <ViewportFrame
@@ -1670,15 +2143,6 @@ function VolumeRenderingArea({
             onMouseEnter={() => setActiveViewport(config.id)}
             onPointerDown={(event) => handleViewportPointerDown(event, config.id)}
             onPointerMove={(event) => handleViewportPointerMove(event, config.id)}
-            scroller={
-              <SliceScrollBar
-                current={sliceIndex}
-                onChange={(nextSliceIndex) =>
-                  handleSliceScrollChange(config.id, nextSliceIndex)
-                }
-                total={sliceTotal}
-              />
-            }
             segmentationStatus={
               segmentationUrl && maskOverlayStatus !== "idle"
                 ? `Seg ${maskOverlayStatus}`
@@ -1688,11 +2152,14 @@ function VolumeRenderingArea({
             windowPreset={activePreset}
           >
           <div
-            className="h-full w-full"
+            className={cn(
+              "h-full w-full",
+              shouldShowLoading && "pointer-events-none",
+            )}
             onWheel={(event) => handleViewportWheel(event, config.id)}
             ref={(element) => setViewportElement(config.id, element)}
           />
-          {layout === "mpr" || activeTool === "crosshair" ? (
+          {!shouldShowLoading && (layout === "mpr" || activeTool === "crosshair") ? (
             <div className="pointer-events-none absolute inset-0 z-20">
               <div
                 className="absolute top-0 w-px bg-primary/80"
@@ -1779,6 +2246,19 @@ function VolumeRenderingArea({
           </ViewportFrame>
         );
       })}
+
+      {!shouldShowLoading && !error && activeScrollerViewportId ? (
+        <div className="absolute bottom-4 right-4 top-16 z-30">
+          <SliceScrollBar
+            className="w-8 bg-black/70"
+            current={activeScrollerSlice}
+            onChange={(nextSliceIndex) =>
+              handleSliceScrollChange(activeScrollerViewportId, nextSliceIndex)
+            }
+            total={activeScrollerTotal}
+          />
+        </div>
+      ) : null}
 
       {segmentationUrl && maskOverlayStatus !== "idle" ? (
         <div

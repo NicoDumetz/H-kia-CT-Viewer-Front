@@ -284,15 +284,22 @@ export function SegmentationLabelPanel({
 
                 {isCollapsed ? null : (
                   <div className="divide-y divide-border-soft">
-                    {groupLabels.map((label) => (
-                      <div
-                        className={cn(
-                          "grid grid-cols-[auto_auto_minmax(0,1fr)_auto] items-center gap-2 px-2 py-2",
-                          label.isSelected && "bg-primary/10",
-                          !label.isPresent && "opacity-45",
-                        )}
-                        key={label.labelId}
-                      >
+                    {groupLabels.map((label) => {
+                      const canFocusLabel = Boolean(
+                        label.isPresent &&
+                          ((label.centerIjk && label.centerIjk.length >= 3) ||
+                            (label.centerWorld && label.centerWorld.length >= 3)),
+                      );
+
+                      return (
+                        <div
+                          className={cn(
+                            "grid grid-cols-[auto_auto_minmax(0,1fr)_auto] items-center gap-2 px-2 py-2",
+                            label.isSelected && "bg-primary/10",
+                            !label.isPresent && "opacity-45",
+                          )}
+                          key={label.labelId}
+                        >
                         <input
                           aria-label={`Afficher ${label.name}`}
                           checked={label.isPresent && label.isVisible}
@@ -318,14 +325,15 @@ export function SegmentationLabelPanel({
                         </div>
                         <button
                           className="h-7 rounded border border-border-soft px-2 text-[11px] font-medium text-text-soft transition hover:border-primary/70 hover:text-text disabled:cursor-not-allowed disabled:opacity-40"
-                          disabled={!label.isPresent}
+                          disabled={!canFocusLabel}
                           onClick={() => onCenterLabel(label.labelId)}
                           type="button"
                         >
                           Focus
                         </button>
-                      </div>
-                    ))}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </section>

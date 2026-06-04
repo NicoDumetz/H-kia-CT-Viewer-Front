@@ -136,3 +136,15 @@ export async function createNiftiImageIds(url: string): Promise<string[]> {
 
   return imageIds as string[];
 }
+
+export function releaseDecompressedNiftiUrl(url: string) {
+  const absoluteUrl = getAbsoluteBrowserUrl(url);
+  const blobUrl = decompressedNiftiUrls.get(absoluteUrl);
+
+  if (!blobUrl) {
+    return;
+  }
+
+  URL.revokeObjectURL(blobUrl);
+  decompressedNiftiUrls.delete(absoluteUrl);
+}

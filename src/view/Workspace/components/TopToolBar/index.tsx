@@ -48,6 +48,7 @@ type ToolbarItem<TId extends string> = {
   id: TId;
   label: string;
   icon: ReactNode;
+  isEnabled?: boolean;
 };
 
 type TopToolBarProps = {
@@ -73,14 +74,34 @@ const viewerTools: Array<ToolbarItem<ViewerTool>> = [
   { id: "pan", icon: <OpenWithRoundedIcon fontSize="small" />, label: "Pan" },
   { id: "zoom", icon: <ZoomInRoundedIcon fontSize="small" />, label: "Zoom" },
   { id: "crosshair", icon: <CenterFocusStrongRoundedIcon fontSize="small" />, label: "Crosshair" },
-  { id: "length", icon: <StraightenRoundedIcon fontSize="small" />, label: "Length" },
-  { id: "hu", icon: <FilterCenterFocusRoundedIcon fontSize="small" />, label: "HU ROI" },
+  {
+    id: "length",
+    icon: <StraightenRoundedIcon fontSize="small" />,
+    isEnabled: false,
+    label: "Length - à venir",
+  },
+  {
+    id: "hu",
+    icon: <FilterCenterFocusRoundedIcon fontSize="small" />,
+    isEnabled: false,
+    label: "HU ROI - à venir",
+  },
 ];
 
 const viewerActions: Array<ToolbarItem<ViewerAction>> = [
   { id: "reset", icon: <RestartAltRoundedIcon fontSize="small" />, label: "Reset" },
-  { id: "capture", icon: <PhotoCameraRoundedIcon fontSize="small" />, label: "Capture" },
-  { id: "undo", icon: <UndoRoundedIcon fontSize="small" />, label: "Undo" },
+  {
+    id: "capture",
+    icon: <PhotoCameraRoundedIcon fontSize="small" />,
+    isEnabled: false,
+    label: "Capture - à venir",
+  },
+  {
+    id: "undo",
+    icon: <UndoRoundedIcon fontSize="small" />,
+    isEnabled: false,
+    label: "Undo - à venir",
+  },
 ];
 
 const layoutItems: Array<ToolbarItem<ViewerLayoutMode>> = [
@@ -192,7 +213,7 @@ export function TopToolBar({
         {viewerTools.map((tool) => (
           <CompactButton
             active={activeTool === tool.id}
-            disabled={viewerMode === "volume3d"}
+            disabled={viewerMode === "volume3d" || tool.isEnabled === false}
             key={tool.id}
             label={tool.label}
             onClick={() => onToolChange(tool.id)}
@@ -227,7 +248,7 @@ export function TopToolBar({
       <ToolbarGroup>
         {viewerActions.map((action) => (
           <CompactButton
-            disabled={viewerMode === "volume3d"}
+            disabled={viewerMode === "volume3d" || action.isEnabled === false}
             key={action.id}
             label={action.label}
             onClick={() => onViewerAction(action.id)}
