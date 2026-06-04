@@ -22,7 +22,7 @@ import { Input } from "~/components/Input";
 
 type SegmentationUploadProps = {
   isBusy: boolean;
-  onUpload: (file: File, name?: string) => void;
+  onUpload: (file: File, name?: string, labelsFile?: File) => void;
 };
 
 function isNiftiFile(file: File) {
@@ -33,6 +33,7 @@ function isNiftiFile(file: File) {
 
 export function SegmentationUpload({ isBusy, onUpload }: SegmentationUploadProps) {
   const [file, setFile] = useState<File | null>(null);
+  const [labelsFile, setLabelsFile] = useState<File | null>(null);
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
 
@@ -41,6 +42,10 @@ export function SegmentationUpload({ isBusy, onUpload }: SegmentationUploadProps
 
     setFile(nextFile);
     setError(null);
+  };
+
+  const handleLabelsFileChange = (event: ChangeEvent<HTMLInputElement>) => {
+    setLabelsFile(event.target.files?.[0] || null);
   };
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -56,7 +61,7 @@ export function SegmentationUpload({ isBusy, onUpload }: SegmentationUploadProps
       return;
     }
 
-    onUpload(file, name.trim() || undefined);
+    onUpload(file, name.trim() || undefined, labelsFile || undefined);
   };
 
   return (
@@ -76,6 +81,13 @@ export function SegmentationUpload({ isBusy, onUpload }: SegmentationUploadProps
         placeholder="Masque externe"
         type="text"
         value={name}
+      />
+      <Input
+        accept=".json,application/json"
+        disabled={isBusy}
+        label="Labels JSON optionnel"
+        onChange={handleLabelsFileChange}
+        type="file"
       />
       <p className="text-xs leading-relaxed text-text-muted">
         Le masque doit avoir la meme shape que le volume prepare.

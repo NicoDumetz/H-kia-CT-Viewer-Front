@@ -16,3 +16,4 @@
 // =============================================================
 
 export { FileInput } from "./FileInput";
+export { ImportPanel } from "./ImportPanel";

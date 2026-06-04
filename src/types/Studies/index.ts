@@ -15,7 +15,7 @@
 //
 // =============================================================
 
-export type StudyStatus = "imported" | "prepared" | "failed";
+export type StudyStatus = "imported" | "preparing" | "prepared" | "failed";
 export type StudyInputType = "dicom" | "dicomdir" | "nifti" | "unknown";
 
 export type StudyFile = {
@@ -32,6 +32,7 @@ export type Study = {
   metadata: Record<string, unknown>;
   created_at?: string;
   updated_at?: string;
+  error?: string | null;
   source_files?: StudyFile[];
   prepared_volume?: {
     filename: string;
@@ -62,7 +63,10 @@ export type VolumeMetadata = {
   spacing: number[];
   origin?: number[] | null;
   direction?: number[] | null;
+  affine?: number[][] | null;
   intensity: VolumeIntensity;
+  source_type?: "nifti" | "dicom" | string;
+  prepared_at?: string;
   selected_series_instance_uid?: string | null;
   selected_series_description?: string | null;
   selected_protocol_name?: string | null;
@@ -79,9 +83,11 @@ export type PreparedVolume = {
 
 export type StudyVolumeResponse = {
   study_id: string;
-  status: "prepared";
+  status: string;
   volume: PreparedVolume;
 };
+
+export type StudyPrepareResponse = StudyVolumeResponse;
 
 export type ViewerNifti = {
   filename: string;
@@ -104,10 +110,12 @@ export type ViewerDicomImage = {
 };
 
 export type ViewerDicomSeries = {
-  series_instance_uid: string;
+  series_instance_uid: string | null;
+  study_instance_uid?: string | null;
   modality?: string | null;
   series_description?: string | null;
   protocol_name?: string | null;
+  manufacturer?: string | null;
   files_count: number;
   rows?: number | null;
   columns?: number | null;

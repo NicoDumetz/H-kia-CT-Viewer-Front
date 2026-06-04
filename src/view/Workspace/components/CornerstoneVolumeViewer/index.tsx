@@ -41,13 +41,21 @@ import type { PointerEvent, WheelEvent } from "react";
 import { Measurements } from "~/api";
 import { Button } from "~/components/Button";
 import { VTKVolume3DViewer } from "../VTKVolume3DViewer";
+import { SliceScrollBar } from "../SliceScrollBar";
+import {
+  getViewportGridItemClassName,
+  ViewportFrame,
+  ViewportGrid,
+} from "../ViewportGrid";
 import type {
   CornerstoneViewerSource,
   HuMeasurementPanelState,
   MaskOverlayStatus,
   ViewerActionRequest,
   ViewerCrosshairTarget,
+  ViewerLayoutMode,
   ViewerTool,
+  WindowPresetId,
 } from "../CornerstoneViewer";
 import type { MaskLabelState } from "../MaskLabelsPanel";
 import { LoadingState } from "~/components/LoadingState";
@@ -63,9 +71,8 @@ import type {
   MeasurementPlane,
 } from "~/types/Measurements";
 
-type WindowPresetId = "soft" | "bone" | "lung";
-type ViewerMode = "mpr" | "axial" | "sagittal" | "coronal" | "volume3d";
-type VolumeLayout = Exclude<ViewerMode, "volume3d">;
+type ViewerMode = ViewerLayoutMode;
+type VolumeLayout = Exclude<ViewerLayoutMode, "volume3d">;
 type MprViewportKey = Exclude<VolumeLayout, "mpr">;
 type CornerstoneToolGroup = NonNullable<ReturnType<typeof ToolGroupManager.getToolGroup>>;
 
@@ -133,10 +140,15 @@ type CornerstoneVolumeViewerProps = {
   isMaskVisible?: boolean;
   maskLabels?: MaskLabelState[];
   maskOpacity?: number;
+  showControls?: boolean;
   segmentationUrl?: string | null;
+  viewerMode?: ViewerLayoutMode;
+  windowPreset?: WindowPresetId;
   onActiveToolChange?: (tool: ViewerTool) => void;
   onHuMeasurementChange?: (state: HuMeasurementPanelState) => void;
   onMaskOverlayStatusChange?: (status: MaskOverlayStatus) => void;
+  onViewerModeChange?: (mode: ViewerLayoutMode) => void;
+  onWindowPresetChange?: (preset: WindowPresetId) => void;
   studyId?: string;
   className?: string;
 };
@@ -156,6 +168,7 @@ type VolumeRenderingAreaProps = {
   onHuMeasurementChange?: (state: HuMeasurementPanelState) => void;
   onMaskOverlayStatusChange?: (status: MaskOverlayStatus) => void;
   onPresetChange: (preset: WindowPresetId) => void;
+  onViewportDoubleClick?: (viewportKey: MprViewportKey) => void;
   renderingEngineId: string;
   segmentationId: string;
   segmentationUrl?: string | null;
@@ -236,32 +249,59 @@ function getViewportConfigs(baseViewportId: string): ViewportConfig[] {
   ];
 }
 
-function getGridClassName(layout: VolumeLayout) {
-  if (layout === "mpr") {
-    return "grid grid-cols-2 grid-rows-2";
-  }
-
-  return "grid grid-cols-1 grid-rows-1";
-}
-
-function getViewportClassName(layout: VolumeLayout, viewportKey: MprViewportKey) {
-  if (layout !== "mpr" && layout !== viewportKey) {
-    return "hidden";
-  }
-
-  if (layout === "mpr" && viewportKey === "coronal") {
-    return "col-span-2";
-  }
-
-  return "";
-}
-
 function getSourceKey(source: Extract<CornerstoneViewerSource, { type: "nifti" }>) {
   return `nifti-${source.url}`.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 120);
 }
 
 function getPreset(presetId: WindowPresetId) {
   return windowPresets.find((item) => item.id === presetId) || windowPresets[0];
+}
+
+function getSliceTotal(
+  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+  viewportKey: MprViewportKey,
+) {
+  const shape = source.metadata?.shape || [];
+  const totalByViewport: Record<MprViewportKey, number> = {
+    axial: shape[2] || 1,
+    coronal: shape[1] || 1,
+    sagittal: shape[0] || 1,
+  };
+
+  return Math.max(1, totalByViewport[viewportKey]);
+}
+
+function getInitialSliceIndices(source: Extract<CornerstoneViewerSource, { type: "nifti" }>) {
+  return {
+    axial: Math.floor(getSliceTotal(source, "axial") / 2),
+    coronal: Math.floor(getSliceTotal(source, "coronal") / 2),
+    sagittal: Math.floor(getSliceTotal(source, "sagittal") / 2),
+  };
+}
+
+function clampSliceIndex(value: number, total: number) {
+  return Math.max(0, Math.min(Math.max(0, total - 1), value));
+}
+
+function getViewportDimensions(
+  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+  viewportKey: MprViewportKey,
+) {
+  const shape = source.metadata?.shape || [];
+
+  if (viewportKey === "axial") {
+    return shape[0] && shape[1] ? `${shape[0]} x ${shape[1]}` : undefined;
+  }
+
+  if (viewportKey === "sagittal") {
+    return shape[1] && shape[2] ? `${shape[1]} x ${shape[2]}` : undefined;
+  }
+
+  return shape[0] && shape[2] ? `${shape[0]} x ${shape[2]}` : undefined;
+}
+
+function getSliceLabel(sliceIndex: number, total: number) {
+  return `${clampSliceIndex(sliceIndex, total) + 1}/${Math.max(1, total)}`;
 }
 
 function applyWindowPreset(viewports: Types.IViewport[], presetId: WindowPresetId) {
@@ -480,10 +520,57 @@ function getMeasurementErrorMessage(error: unknown) {
   return "Calcul HU indisponible.";
 }
 
-function createMaskColorLUT(): Types.ColorLUT {
+function parseMaskLabelColor(color: string): [number, number, number] | null {
+  const normalizedColor = color.trim();
+  const hexMatch = normalizedColor.match(/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i);
+
+  if (hexMatch) {
+    const hex = hexMatch[1];
+    const expandedHex =
+      hex.length === 3
+        ? hex
+            .split("")
+            .map((channel) => `${channel}${channel}`)
+            .join("")
+        : hex;
+
+    return [
+      Number.parseInt(expandedHex.slice(0, 2), 16),
+      Number.parseInt(expandedHex.slice(2, 4), 16),
+      Number.parseInt(expandedHex.slice(4, 6), 16),
+    ];
+  }
+
+  const rgbMatch = normalizedColor.match(/^rgba?\(([^)]+)\)$/i);
+
+  if (!rgbMatch) {
+    return null;
+  }
+
+  const channels = rgbMatch[1]
+    .split(",")
+    .slice(0, 3)
+    .map((channel) => Number.parseFloat(channel.trim()));
+
+  if (channels.length !== 3 || channels.some((channel) => !Number.isFinite(channel))) {
+    return null;
+  }
+
+  return channels.map((channel) => Math.max(0, Math.min(255, Math.round(channel)))) as [
+    number,
+    number,
+    number,
+  ];
+}
+
+function createMaskColorLUT(maskLabels: MaskLabelState[] = []): Types.ColorLUT {
+  const maxLabelId = Math.max(
+    255,
+    ...maskLabels.map((label) => (Number.isFinite(label.labelId) ? label.labelId : 0)),
+  );
   const lut: Types.ColorLUT = [[0, 0, 0, 0]];
 
-  for (let index = 1; index < 256; index += 1) {
+  for (let index = 1; index <= maxLabelId; index += 1) {
     const hue = (index * 47) % 360;
     const saturation = 0.78;
     const lightness = 0.54;
@@ -511,6 +598,20 @@ function createMaskColorLUT(): Types.ColorLUT {
       190,
     ];
   }
+
+  maskLabels.forEach((label) => {
+    if (!Number.isFinite(label.labelId) || label.labelId <= 0) {
+      return;
+    }
+
+    const parsedColor = parseMaskLabelColor(label.color);
+
+    if (!parsedColor) {
+      return;
+    }
+
+    lut[label.labelId] = [...parsedColor, 190];
+  });
 
   return lut;
 }
@@ -603,6 +704,7 @@ function VolumeRenderingArea({
   onHuMeasurementChange,
   onMaskOverlayStatusChange,
   onPresetChange,
+  onViewportDoubleClick,
   renderingEngineId,
   segmentationId,
   segmentationUrl,
@@ -630,6 +732,7 @@ function VolumeRenderingArea({
   const huCircleDraftRef = useRef<HuCircleDraft | null>(null);
   const handledActionRequestIdRef = useRef<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [activeViewportId, setActiveViewportId] = useState<string | null>(null);
   const [crosshairPosition, setCrosshairPosition] = useState<CrosshairPosition>({
     x: 0.5,
     y: 0.5,
@@ -640,11 +743,20 @@ function VolumeRenderingArea({
   const [isLoading, setIsLoading] = useState(false);
   const [isSceneReady, setIsSceneReady] = useState(false);
   const [maskOverlayStatus, setMaskOverlayStatus] = useState<MaskOverlayStatus>("idle");
+  const [sliceIndices, setSliceIndices] = useState(() => getInitialSliceIndices(source));
   const [toolMessage, setToolMessage] = useState<string | null>(null);
   const viewportConfigs = useMemo(() => getViewportConfigs(baseViewportId), [baseViewportId]);
   const viewportIds = useMemo(
     () => viewportConfigs.map((config) => config.id),
     [viewportConfigs],
+  );
+  const sliceTotals = useMemo(
+    () => ({
+      axial: getSliceTotal(source, "axial"),
+      coronal: getSliceTotal(source, "coronal"),
+      sagittal: getSliceTotal(source, "sagittal"),
+    }),
+    [source],
   );
 
   const clearHuMeasurement = useCallback(() => {
@@ -663,37 +775,85 @@ function VolumeRenderingArea({
     [onMaskOverlayStatusChange],
   );
 
+  const setActiveViewport = useCallback((viewportId: string) => {
+    activeViewportIdRef.current = viewportId;
+    setActiveViewportId(viewportId);
+  }, []);
+
   const setViewportElement = useCallback((id: string, element: HTMLDivElement | null) => {
     viewportElementsRef.current[id] = element;
 
     if (element && !activeViewportIdRef.current) {
       activeViewportIdRef.current = id;
+      setActiveViewportId(id);
     }
   }, []);
 
-  const handleViewportWheel = useCallback(
-    (event: WheelEvent<HTMLDivElement>, viewportId: string) => {
+  const scrollViewport = useCallback(
+    (viewportId: string, delta: number) => {
       const viewport =
         viewportsByIdRef.current[viewportId] || renderingEngineRef.current?.getViewport(viewportId);
       const scrollableViewport = viewport as ScrollableViewport | undefined;
-      const delta = event.deltaY > 0 ? 1 : event.deltaY < 0 ? -1 : 0;
+      const viewportKey = getPlaneByViewportId(viewportId, viewportConfigs);
 
-      if (!delta || !scrollableViewport?.scroll) {
+      if (!delta || !scrollableViewport?.scroll || !viewportKey) {
         return;
       }
-
-      event.preventDefault();
 
       try {
         scrollableViewport.scroll(delta);
         scrollableViewport.render();
+        setSliceIndices((currentIndices) => ({
+          ...currentIndices,
+          [viewportKey]: clampSliceIndex(
+            currentIndices[viewportKey] + delta,
+            sliceTotals[viewportKey],
+          ),
+        }));
         clearHuMeasurement();
         setToolMessage(null);
       } catch {
         // Some Cornerstone viewport implementations do not expose local scroll.
       }
     },
-    [clearHuMeasurement],
+    [clearHuMeasurement, sliceTotals, viewportConfigs],
+  );
+
+  const handleViewportWheel = useCallback(
+    (event: WheelEvent<HTMLDivElement>, viewportId: string) => {
+      const delta = event.deltaY > 0 ? 1 : event.deltaY < 0 ? -1 : 0;
+
+      if (!delta) {
+        return;
+      }
+
+      event.preventDefault();
+      setActiveViewport(viewportId);
+      scrollViewport(viewportId, delta);
+    },
+    [scrollViewport, setActiveViewport],
+  );
+
+  const handleSliceScrollChange = useCallback(
+    (viewportId: string, nextSliceIndex: number) => {
+      const viewportKey = getPlaneByViewportId(viewportId, viewportConfigs);
+
+      if (!viewportKey) {
+        return;
+      }
+
+      const currentSliceIndex = sliceIndices[viewportKey];
+      const delta = clampSliceIndex(nextSliceIndex, sliceTotals[viewportKey]) - currentSliceIndex;
+
+      setActiveViewport(viewportId);
+
+      if (!delta) {
+        return;
+      }
+
+      scrollViewport(viewportId, delta);
+    },
+    [scrollViewport, setActiveViewport, sliceIndices, sliceTotals, viewportConfigs],
   );
 
   const updateCrosshairPositionFromEvent = useCallback(
@@ -704,10 +864,10 @@ function VolumeRenderingArea({
         return;
       }
 
-      activeViewportIdRef.current = viewportId;
+      setActiveViewport(viewportId);
       setCrosshairPosition(position);
     },
-    [],
+    [setActiveViewport],
   );
 
   const handleViewportPointerDown = useCallback(
@@ -793,7 +953,7 @@ function VolumeRenderingArea({
 
       event.preventDefault();
       event.stopPropagation();
-      activeViewportIdRef.current = viewportId;
+      setActiveViewport(viewportId);
       setToolMessage(null);
       setCrosshairPosition(getRelativePointerPosition(event, viewportElementsRef.current[viewportId]) || crosshairPosition);
       const currentDraft = huCircleDraftRef.current;
@@ -827,7 +987,7 @@ function VolumeRenderingArea({
       setHuResult(null);
       onHuMeasurementChange?.({ status: "draft" });
     },
-    [crosshairPosition, finalizeHuCircle, onHuMeasurementChange, viewportConfigs],
+    [crosshairPosition, finalizeHuCircle, onHuMeasurementChange, setActiveViewport, viewportConfigs],
   );
 
   const handleHuPointerMove = useCallback(
@@ -941,6 +1101,10 @@ function VolumeRenderingArea({
   }, [activePreset]);
 
   useEffect(() => {
+    setSliceIndices(getInitialSliceIndices(source));
+  }, [source]);
+
+  useEffect(() => {
     activeToolRef.current = activeTool;
 
     if (activeTool !== "none") {
@@ -999,15 +1163,37 @@ function VolumeRenderingArea({
       x: clamp(crosshairTarget.x),
       y: clamp(crosshairTarget.y),
     });
-  }, [crosshairTarget]);
+
+    if (!crosshairTarget.sliceIndices) {
+      return;
+    }
+
+    viewportConfigs.forEach((config) => {
+      const nextSliceIndex = crosshairTarget.sliceIndices?.[config.key];
+
+      if (typeof nextSliceIndex !== "number") {
+        return;
+      }
+
+      const total = sliceTotals[config.key];
+      const currentSliceIndex = sliceIndices[config.key];
+      const delta = clampSliceIndex(nextSliceIndex, total) - currentSliceIndex;
+
+      if (!delta) {
+        return;
+      }
+
+      scrollViewport(config.id, delta);
+    });
+  }, [crosshairTarget, scrollViewport, sliceIndices, sliceTotals, viewportConfigs]);
 
   useEffect(() => {
     const nextViewportId = getLayoutViewportId(layout, viewportConfigs);
 
     if (layout !== "mpr" || !activeViewportIdRef.current) {
-      activeViewportIdRef.current = nextViewportId;
+      setActiveViewport(nextViewportId);
     }
-  }, [layout, viewportConfigs]);
+  }, [layout, setActiveViewport, viewportConfigs]);
 
   useEffect(() => {
     if (!actionRequest || handledActionRequestIdRef.current === actionRequest.id) {
@@ -1224,6 +1410,7 @@ function VolumeRenderingArea({
         const nextViewports = viewportIds.map((viewportId) => renderingEngine!.getViewport(viewportId));
 
         activeViewportIdRef.current = viewportIds[0] || null;
+        setActiveViewportId(viewportIds[0] || null);
         renderingEngineRef.current = renderingEngine;
         viewportsRef.current = nextViewports;
         viewportsByIdRef.current = Object.fromEntries(
@@ -1358,7 +1545,7 @@ function VolumeRenderingArea({
                 {
                   segmentationId,
                   config: {
-                    colorLUTOrIndex: createMaskColorLUT(),
+                    colorLUTOrIndex: createMaskColorLUT(maskLabelsRef.current),
                   },
                 },
               ],
@@ -1468,22 +1655,38 @@ function VolumeRenderingArea({
 
   return (
     <div className="contents" ref={containerRef}>
-      {viewportConfigs.map((config) => (
-        <div
-          className={cn(
-            "relative min-h-0 overflow-hidden rounded border border-border-soft bg-black",
-            getViewportClassName(layout, config.key),
-          )}
-          key={config.id}
-          onMouseEnter={() => {
-            activeViewportIdRef.current = config.id;
-          }}
-          onPointerDown={(event) => handleViewportPointerDown(event, config.id)}
-          onPointerMove={(event) => handleViewportPointerMove(event, config.id)}
-        >
-          <div className="absolute left-2 top-2 z-10 rounded bg-black/60 px-2 py-1 text-xs font-medium text-text-muted">
-            {config.label}
-          </div>
+      {viewportConfigs.map((config) => {
+        const sliceTotal = sliceTotals[config.key];
+        const sliceIndex = sliceIndices[config.key];
+
+        return (
+          <ViewportFrame
+            className={getViewportGridItemClassName(layout, config.key)}
+            dimensions={getViewportDimensions(source, config.key)}
+            isActive={activeViewportId === config.id}
+            key={config.id}
+            label={config.label}
+            onDoubleClick={() => onViewportDoubleClick?.(config.key)}
+            onMouseEnter={() => setActiveViewport(config.id)}
+            onPointerDown={(event) => handleViewportPointerDown(event, config.id)}
+            onPointerMove={(event) => handleViewportPointerMove(event, config.id)}
+            scroller={
+              <SliceScrollBar
+                current={sliceIndex}
+                onChange={(nextSliceIndex) =>
+                  handleSliceScrollChange(config.id, nextSliceIndex)
+                }
+                total={sliceTotal}
+              />
+            }
+            segmentationStatus={
+              segmentationUrl && maskOverlayStatus !== "idle"
+                ? `Seg ${maskOverlayStatus}`
+                : undefined
+            }
+            sliceLabel={getSliceLabel(sliceIndex, sliceTotal)}
+            windowPreset={activePreset}
+          >
           <div
             className="h-full w-full"
             onWheel={(event) => handleViewportWheel(event, config.id)}
@@ -1573,8 +1776,9 @@ function VolumeRenderingArea({
                 );
               })()
             : null}
-        </div>
-      ))}
+          </ViewportFrame>
+        );
+      })}
 
       {segmentationUrl && maskOverlayStatus !== "idle" ? (
         <div
@@ -1624,9 +1828,14 @@ export function CornerstoneVolumeViewer({
   onActiveToolChange,
   onHuMeasurementChange,
   onMaskOverlayStatusChange,
+  onViewerModeChange,
+  onWindowPresetChange,
   segmentationUrl,
+  showControls = true,
   source,
   studyId,
+  viewerMode,
+  windowPreset,
 }: CornerstoneVolumeViewerProps) {
   const reactId = useId().replace(/:/g, "");
   const sourceKey = useMemo(() => getSourceKey(source), [source]);
@@ -1634,9 +1843,11 @@ export function CornerstoneVolumeViewer({
     () => (segmentationUrl ? `seg-${segmentationUrl}`.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 120) : "no-seg"),
     [segmentationUrl],
   );
-  const [activeViewerMode, setActiveViewerMode] = useState<ViewerMode>("mpr");
-  const [activePreset, setActivePreset] = useState<WindowPresetId>("soft");
+  const [internalViewerMode, setInternalViewerMode] = useState<ViewerMode>("mpr");
+  const [internalPreset, setInternalPreset] = useState<WindowPresetId>("soft");
   const [clearTemporaryKey, setClearTemporaryKey] = useState(0);
+  const activeViewerMode = viewerMode || internalViewerMode;
+  const activePreset = windowPreset || internalPreset;
   const renderingEngineId = `hekia-volume-rendering-engine-${reactId}-${sourceKey}`;
   const toolGroupId = `${cornerstoneToolGroupId}-volume-${reactId}-${sourceKey}`;
   const baseViewportId = `hekia-volume-viewport-${reactId}-${sourceKey}`;
@@ -1650,11 +1861,17 @@ export function CornerstoneVolumeViewer({
 
     setClearTemporaryKey((value) => value + 1);
     onHuMeasurementChange?.({ status: "idle" });
-    setActiveViewerMode(nextMode);
+    setInternalViewerMode(nextMode);
+    onViewerModeChange?.(nextMode);
 
     if (nextMode === "volume3d" || previousMode === "volume3d") {
       onActiveToolChange?.("crosshair");
     }
+  };
+
+  const handleWindowPresetChange = (nextPreset: WindowPresetId) => {
+    setInternalPreset(nextPreset);
+    onWindowPresetChange?.(nextPreset);
   };
 
   const handleBackToMpr = () => {
@@ -1664,6 +1881,7 @@ export function CornerstoneVolumeViewer({
 
   return (
     <div className={cn("flex h-full flex-col bg-viewer", className)}>
+      {showControls ? (
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border-soft bg-surface-100 p-2">
         <Toolbar className="gap-1 border-0 bg-transparent">
           {(["mpr", "axial", "sagittal", "coronal", "volume3d"] as ViewerMode[]).map((mode) => (
@@ -1685,7 +1903,7 @@ export function CornerstoneVolumeViewer({
               <Button
                 className="h-8"
                 key={preset.id}
-                onClick={() => setActivePreset(preset.id)}
+                onClick={() => handleWindowPresetChange(preset.id)}
                 size="sm"
                 variant={activePreset === preset.id ? "primary" : "ghost"}
               >
@@ -1695,14 +1913,12 @@ export function CornerstoneVolumeViewer({
           </Toolbar>
         ) : null}
       </div>
+      ) : null}
 
       <div className="relative min-h-0 flex-1 bg-black">
-        <div
-          className={cn(
-            "absolute inset-0 gap-1 bg-black p-1",
-            getGridClassName(activeLayout),
-            activeViewerMode === "volume3d" && "invisible pointer-events-none",
-          )}
+        <ViewportGrid
+          isHidden={activeViewerMode === "volume3d"}
+          layout={activeLayout}
         >
           <VolumeRenderingArea
             activePreset={activePreset}
@@ -1718,7 +1934,10 @@ export function CornerstoneVolumeViewer({
             onActiveToolChange={onActiveToolChange}
             onHuMeasurementChange={onHuMeasurementChange}
             onMaskOverlayStatusChange={onMaskOverlayStatusChange}
-            onPresetChange={setActivePreset}
+            onPresetChange={handleWindowPresetChange}
+            onViewportDoubleClick={(viewportKey) => {
+              handleViewerModeChange(activeViewerMode === viewportKey ? "mpr" : viewportKey);
+            }}
             renderingEngineId={renderingEngineId}
             segmentationId={segmentationId}
             segmentationUrl={segmentationUrl}
@@ -1728,7 +1947,7 @@ export function CornerstoneVolumeViewer({
             toolGroupId={toolGroupId}
             volumeId={volumeId}
           />
-        </div>
+        </ViewportGrid>
 
         {activeViewerMode === "volume3d" ? (
           <div className="absolute inset-0">

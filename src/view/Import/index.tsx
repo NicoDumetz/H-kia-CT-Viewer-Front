@@ -1,21 +1,32 @@
-// src/view/Import/index.tsx
+// =============================================================
+//
+// ██╗  ██╗███████╗██╗  ██╗██╗ █████╗
+// ██║  ██║██╔════╝██║ ██╔╝██║██╔══██╗
+// ███████║█████╗  █████╔╝ ██║███████║
+// ██╔══██║██╔══╝  ██╔═██╗ ██║██╔══██║
+// ██║  ██║███████╗██║  ██╗██║██║  ██║
+// ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝╚═╝  ╚═╝
+//
+// File        : index.tsx
+// Project     : H-kia-CT-Viewer-Front
+// Author      : Nicolas Dumetz
+//
+// Created     : Thursday June 04 2026
+//
+// =============================================================
+
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { Studies } from "~/api";
-import {
-  Badge,
-  Button,
-  ErrorState,
-  LoadingState,
-} from "~/components";
-import { FileInput } from "./components";
-
-const acceptedFormats = "";
-const supportedFormatsLabel = "DICOM (.dcm ou sans extension), DICOMDIR, .nii, .nii.gz";
+import { Badge } from "~/components";
+import { ImportPanel } from "./components";
 
 function getRecord(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== "object") return null;
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
   return value as Record<string, unknown>;
 }
 
@@ -26,10 +37,29 @@ function getImportErrorMessage(error: unknown): string {
   const detail = dataRecord?.detail;
   const message = dataRecord?.message;
 
-  if (typeof detail === "string") return detail;
-  if (typeof message === "string") return message;
-  
+  if (typeof detail === "string") {
+    return detail;
+  }
+
+  if (typeof message === "string") {
+    return message;
+  }
+
   return "Import impossible. Vérifiez l'intégrité des fichiers sélectionnés.";
+}
+
+function getStudyIdFromUploadResponse(data: unknown): string | null {
+  const dataRecord = getRecord(data);
+
+  if (typeof dataRecord?.study_id === "string") {
+    return dataRecord.study_id;
+  }
+
+  if (typeof dataRecord?.id === "string") {
+    return dataRecord.id;
+  }
+
+  return null;
 }
 
 export default function Import() {
@@ -37,9 +67,7 @@ export default function Import() {
   const [files, setFiles] = useState<File[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isImporting, setIsImporting] = useState(false);
-  
   const hasFiles = files.length > 0;
-  const fileCountLabel = files.length > 1 ? `${files.length} fichiers` : `${files.length} fichier`;
 
   const handleFilesChange = (nextFiles: File[]) => {
     setFiles(nextFiles);
@@ -47,14 +75,21 @@ export default function Import() {
   };
 
   const handleImport = async () => {
-    if (!hasFiles || isImporting) return;
+    if (!hasFiles || isImporting) {
+      return;
+    }
 
     setErrorMessage(null);
     setIsImporting(true);
 
     try {
-      const response = await Studies.importStudy(files);
-      const studyId = response.data.id;
+      const response = await Studies.uploadStudy(files);
+      const studyId = getStudyIdFromUploadResponse(response.data);
+
+      if (!studyId) {
+        throw new Error("Réponse backend invalide: identifiant d'étude manquant.");
+      }
+
       navigate(`/studies/${encodeURIComponent(studyId)}/workspace`);
     } catch (error) {
       setErrorMessage(getImportErrorMessage(error));
@@ -64,88 +99,53 @@ export default function Import() {
   };
 
   return (
-    <main className="min-h-screen w-full bg-background flex flex-col items-center justify-center p-4 font-manrope">
-      {/* Header global discret */}
-      <div className="absolute top-0 left-0 w-full p-6 flex justify-between items-center">
-        <div className="flex items-center gap-3">
-          <Badge variant="info" className="bg-primary-900/30 text-primary-300 border border-primary-800/50">IA Clinique</Badge>
-          <span className="text-sm font-semibold text-text-soft">Hékia CT Viewer</span>
+    <main className="flex min-h-screen w-full flex-col bg-background font-manrope text-text">
+      <header className="flex h-12 items-center justify-between border-b border-border bg-surface px-4">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold text-text">Hekia CT Viewer</span>
+          <Badge className="border border-primary-800/50 bg-primary-900/30 text-primary-300" variant="info">
+            Import
+          </Badge>
         </div>
-      </div>
+        <span className="text-xs text-text-muted">Volume canonique backend</span>
+      </header>
 
-      {/* Bloc central */}
-      <section className="w-full max-w-xl flex flex-col gap-8">
-        
-        <header className="text-center space-y-3">
-          <h1 className="text-3xl font-extrabold text-text tracking-tight">
-            Importer un examen CT
-          </h1>
-          <p className="text-sm text-text-muted mx-auto max-w-md leading-relaxed">
-            Sélectionnez une série DICOM ou un volume NIfTI. Le transfert est sécurisé et traité localement.
-          </p>
-        </header>
+      <section className="grid min-h-0 flex-1 grid-cols-1 gap-4 p-4 lg:grid-cols-[minmax(0,44rem)_minmax(18rem,1fr)]">
+        <ImportPanel
+          errorMessage={errorMessage}
+          files={files}
+          isImporting={isImporting}
+          onFilesChange={handleFilesChange}
+          onImport={handleImport}
+        />
 
-        <div className="rounded-2xl border border-border bg-surface shadow-2xl p-6 sm:p-8 space-y-6">
-          <FileInput
-            accept={acceptedFormats}
-            allowDirectory
-            formatsLabel={supportedFormatsLabel}
-            hint="Pour un DICOMDIR, sélectionnez le dossier racine qui contient DICOMDIR et les sous-dossiers d'images."
-            multiple
-            onFilesChange={handleFilesChange}
-          />
-
-          {hasFiles && (
-            <div className="rounded-xl border border-border-soft bg-surface-100 p-4">
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-xs font-semibold uppercase tracking-wider text-text-muted">
-                  Fichiers en attente
-                </span>
-                <span className="text-xs font-medium text-primary-400 bg-primary-900/20 px-2 py-1 rounded-md">
-                  {fileCountLabel}
-                </span>
-              </div>
-              
-              <ul className="max-h-32 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
-                {files.map((file) => (
-                  <li 
-                    className="truncate text-sm text-text-soft flex items-center gap-2" 
-                    key={`${file.name}-${file.lastModified}`}
-                  >
-                    <svg className="w-4 h-4 text-text-muted flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                    </svg>
-                    {"webkitRelativePath" in file && file.webkitRelativePath
-                      ? file.webkitRelativePath
-                      : file.name}
-                  </li>
-                ))}
-              </ul>
+        <div className="hidden min-h-0 flex-col gap-3 overflow-hidden rounded border border-border bg-surface p-4 lg:flex">
+          <div className="rounded border border-border-soft bg-surface-100 p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+              Flux cible
+            </p>
+            <div className="mt-3 space-y-2 text-xs leading-relaxed text-text-soft">
+              <p>1. Upload NIfTI, DICOM, DICOMDIR ou zip DICOM.</p>
+              <p>2. Préparation backend vers derived/volume/ct.nii.gz.</p>
+              <p>3. Ouverture du workspace sur /viewer et /volume.</p>
+              <p>4. Le rendu principal utilise le volume préparé, pas la stack brute.</p>
             </div>
-          )}
+          </div>
 
-          {errorMessage && (
-            <div className="p-4 rounded-xl bg-quaternary-900/20 border border-quaternary-800/50">
-              <ErrorState message={errorMessage} title="Erreur d'importation" />
+          <div className="grid grid-cols-2 gap-3 text-xs">
+            <div className="rounded border border-border-soft bg-black/20 p-3">
+              <p className="font-semibold text-text">Importer un masque</p>
+              <p className="mt-1 leading-relaxed text-text-muted">
+                Disponible dans le panel segmentation après ouverture du viewer.
+              </p>
             </div>
-          )}
-
-          {isImporting && (
-            <div className="py-2">
-              <LoadingState label="Transfert et préparation de l'examen..." />
+            <div className="rounded border border-border-soft bg-black/20 p-3">
+              <p className="font-semibold text-text">Lancer l'IA</p>
+              <p className="mt-1 leading-relaxed text-text-muted">
+                Disponible dès que le volume est préparé et le module nnU-Net présent.
+              </p>
             </div>
-          )}
-
-          <Button
-            disabled={!hasFiles || isImporting}
-            fullWidth
-            isLoading={isImporting}
-            onClick={handleImport}
-            variant="primary"
-            className="h-12 text-base font-semibold shadow-primary-custom"
-          >
-            {isImporting ? "Importation..." : "Démarrer l'analyse"}
-          </Button>
+          </div>
         </div>
       </section>
     </main>

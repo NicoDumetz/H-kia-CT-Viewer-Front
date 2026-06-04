@@ -22,6 +22,7 @@ import type {
   Study,
   StudyImportResponse,
   StudyListResponse,
+  StudyPrepareResponse,
   StudyViewerResponse,
   StudyVolumeResponse,
 } from "~/types/Studies";
@@ -29,6 +30,14 @@ import type {
 type FileWithRelativePath = File & {
   webkitRelativePath?: string;
 };
+
+type StudyUploadResponse = StudyImportResponse | StudyPrepareResponse;
+
+function isNiftiFile(file: File) {
+  const filename = file.name.toLowerCase();
+
+  return filename.endsWith(".nii") || filename.endsWith(".nii.gz");
+}
 
 export class Studies {
   static endpoint = "/studies";
@@ -50,6 +59,41 @@ export class Studies {
     return Api.post<StudyImportResponse, FormData>(`${Studies.endpoint}/import`, formData);
   }
 
+  static uploadStudy(files: File[]): ApiRequest<StudyUploadResponse> {
+    if (files.length === 1 && isNiftiFile(files[0])) {
+      return Studies.uploadNifti(files[0]);
+    }
+
+    return Studies.uploadDicom(files);
+  }
+
+  static uploadNifti(file: File): ApiRequest<StudyPrepareResponse> {
+    const formData = new FormData();
+
+    formData.append("file", file);
+
+    return Api.post<StudyPrepareResponse, FormData>(
+      `${Studies.endpoint}/upload-nifti`,
+      formData,
+    );
+  }
+
+  static uploadDicom(files: File[]): ApiRequest<StudyPrepareResponse> {
+    const formData = new FormData();
+
+    files.forEach((file) => {
+      const fileWithRelativePath = file as FileWithRelativePath;
+      const filename = fileWithRelativePath.webkitRelativePath || file.name;
+
+      formData.append("files", file, filename);
+    });
+
+    return Api.post<StudyPrepareResponse, FormData>(
+      `${Studies.endpoint}/upload-dicom`,
+      formData,
+    );
+  }
+
   static getStudies(): ApiRequest<StudyListResponse> {
     return Api.get<StudyListResponse>(Studies.endpoint);
   }
@@ -64,8 +108,10 @@ export class Studies {
     );
   }
 
-  static prepareStudy(studyId: string): ApiRequest<Study> {
-    return Api.post<Study>(`${Studies.endpoint}/${encodeURIComponent(studyId)}/prepare`);
+  static prepareStudy(studyId: string): ApiRequest<StudyPrepareResponse> {
+    return Api.post<StudyPrepareResponse>(
+      `${Studies.endpoint}/${encodeURIComponent(studyId)}/prepare`,
+    );
   }
 
   static getVolume(studyId: string): ApiRequest<StudyVolumeResponse> {

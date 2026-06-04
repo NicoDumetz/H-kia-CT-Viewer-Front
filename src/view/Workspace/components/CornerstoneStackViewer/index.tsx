@@ -31,10 +31,11 @@ import type { WheelEvent } from "react";
 import { Button } from "~/components/Button";
 import { LoadingState } from "~/components/LoadingState";
 import { Toolbar } from "~/components/Toolbar";
+import { SliceScrollBar } from "../SliceScrollBar";
+import { ViewportFrame } from "../ViewportGrid";
 import { cornerstoneToolGroupId, initCornerstone } from "~/helpers/Cornerstone";
 import { cn } from "~/helpers/Cn";
-
-type WindowPresetId = "soft" | "bone" | "lung";
+import type { WindowPresetId } from "../CornerstoneViewer";
 
 type WindowPreset = {
   id: WindowPresetId;
@@ -52,6 +53,9 @@ type CornerstoneStackViewerProps = {
   imageIds: string[];
   isMaskVisible?: boolean;
   segmentationUrl?: string | null;
+  showControls?: boolean;
+  windowPreset?: WindowPresetId;
+  onWindowPresetChange?: (preset: WindowPresetId) => void;
   className?: string;
 };
 
@@ -104,7 +108,10 @@ export function CornerstoneStackViewer({
   className,
   imageIds,
   isMaskVisible = true,
+  onWindowPresetChange,
   segmentationUrl,
+  showControls = true,
+  windowPreset,
 }: CornerstoneStackViewerProps) {
   const reactId = useId().replace(/:/g, "");
   const renderingEngineId = `hekia-stack-rendering-engine-${reactId}`;
@@ -115,30 +122,52 @@ export function CornerstoneStackViewer({
   const viewportRef = useRef<StackViewport | null>(null);
   const setupTokenRef = useRef(0);
   const isRenderingReadyRef = useRef(false);
-  const activePresetRef = useRef<WindowPresetId>("soft");
-  const [activePreset, setActivePreset] = useState<WindowPresetId>("soft");
+  const activePresetRef = useRef<WindowPresetId>(windowPreset || "soft");
+  const [internalPreset, setInternalPreset] = useState<WindowPresetId>("soft");
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [sliceIndex, setSliceIndex] = useState(0);
+  const activePreset = windowPreset || internalPreset;
 
   const setPreset = useCallback((presetId: WindowPresetId) => {
     activePresetRef.current = presetId;
-    setActivePreset(presetId);
+    setInternalPreset(presetId);
+    onWindowPresetChange?.(presetId);
     applyWindowPreset(viewportRef.current, presetId);
-  }, []);
+  }, [onWindowPresetChange]);
 
-  const handleViewportWheel = useCallback((event: WheelEvent<HTMLDivElement>) => {
+  const scrollStack = useCallback((delta: number) => {
     const viewport = viewportRef.current as (StackViewport & {
       scroll?: (delta?: number) => void;
     }) | null;
 
-    if (!viewport?.scroll) {
+    if (!delta || !viewport?.scroll) {
+      return;
+    }
+
+    viewport.scroll(delta);
+    viewport.render();
+    setSliceIndex((currentIndex) =>
+      Math.max(0, Math.min(Math.max(0, imageIds.length - 1), currentIndex + delta)),
+    );
+  }, [imageIds.length]);
+
+  const handleViewportWheel = useCallback((event: WheelEvent<HTMLDivElement>) => {
+    const delta = event.deltaY > 0 ? 1 : event.deltaY < 0 ? -1 : 0;
+
+    if (!delta) {
       return;
     }
 
     event.preventDefault();
-    viewport.scroll(event.deltaY > 0 ? 1 : -1);
-    viewport.render();
-  }, []);
+    scrollStack(delta);
+  }, [scrollStack]);
+
+  const handleSliceChange = useCallback((nextSliceIndex: number) => {
+    const delta = nextSliceIndex - sliceIndex;
+
+    scrollStack(delta);
+  }, [scrollStack, sliceIndex]);
 
   useEffect(() => {
     setupTokenRef.current += 1;
@@ -222,6 +251,7 @@ export function CornerstoneStackViewer({
         });
 
         await viewport.setStack(imageIds, 0);
+        setSliceIndex(0);
 
         if (isCancelled || setupToken !== setupTokenRef.current) {
           renderingEngine.destroy();
@@ -279,10 +309,20 @@ export function CornerstoneStackViewer({
     };
   }, [imageIds, renderingEngineId, toolGroupId, viewportId]);
 
+  useEffect(() => {
+    if (!windowPreset) {
+      return;
+    }
+
+    activePresetRef.current = windowPreset;
+    applyWindowPreset(viewportRef.current, windowPreset);
+  }, [windowPreset]);
+
   const shouldShowLoading = !error && (isLoading || !viewportRef.current);
 
   return (
     <div className={cn("flex h-full flex-col bg-viewer", className)}>
+      {showControls ? (
       <div className="flex flex-wrap items-center justify-end gap-2 border-b border-border-soft bg-surface-100 p-2">
         <Toolbar className="gap-1 border-0 bg-transparent">
           {windowPresets.map((preset) => (
@@ -298,6 +338,7 @@ export function CornerstoneStackViewer({
           ))}
         </Toolbar>
       </div>
+      ) : null}
 
       <div className="relative min-h-0 flex-1 bg-black p-1">
         {segmentationUrl ? (
@@ -308,12 +349,21 @@ export function CornerstoneStackViewer({
           </div>
         ) : null}
 
-        <div className="relative h-full min-h-0 overflow-hidden rounded border border-border-soft bg-black">
-          <div className="absolute left-2 top-2 z-10 rounded bg-black/60 px-2 py-1 text-xs font-medium text-text-muted">
-            DICOM
-          </div>
+        <ViewportFrame
+          className="h-full"
+          label="DICOM"
+          scroller={
+            <SliceScrollBar
+              current={sliceIndex}
+              onChange={handleSliceChange}
+              total={imageIds.length}
+            />
+          }
+          sliceLabel={`${sliceIndex + 1}/${Math.max(1, imageIds.length)}`}
+          windowPreset={activePreset}
+        >
           <div className="h-full w-full" onWheel={handleViewportWheel} ref={elementRef} />
-        </div>
+        </ViewportFrame>
 
         {shouldShowLoading ? (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-viewer">

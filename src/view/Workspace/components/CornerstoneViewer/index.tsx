@@ -20,6 +20,7 @@ import { CornerstoneVolumeViewer } from "../CornerstoneVolumeViewer";
 import type { MaskLabelState } from "../MaskLabelsPanel";
 import { cn } from "~/helpers/Cn";
 import type { HuCircleMeasurement } from "~/types/Measurements";
+import type { VolumeMetadata } from "~/types/Studies";
 
 export type ViewerTool =
   | "window"
@@ -31,6 +32,8 @@ export type ViewerTool =
   | "none";
 
 export type ViewerAction = "reset" | "capture" | "undo";
+export type ViewerLayoutMode = "mpr" | "axial" | "sagittal" | "coronal" | "volume3d";
+export type WindowPresetId = "soft" | "bone" | "lung";
 
 export type ViewerActionRequest = {
   action: ViewerAction;
@@ -61,6 +64,7 @@ export type HuMeasurementPanelState =
     };
 
 export type ViewerCrosshairTarget = {
+  sliceIndices?: Partial<Record<"axial" | "sagittal" | "coronal", number>>;
   x: number;
   y: number;
 };
@@ -75,6 +79,7 @@ export type CornerstoneViewerSource =
       type: "nifti";
       url: string;
       name?: string;
+      metadata?: VolumeMetadata;
     };
 
 type CornerstoneViewerProps = {
@@ -86,11 +91,16 @@ type CornerstoneViewerProps = {
   isMaskVisible?: boolean;
   maskLabels?: MaskLabelState[];
   maskOpacity?: number;
+  showControls?: boolean;
   segmentationUrl?: string | null;
   studyId?: string;
+  viewerMode?: ViewerLayoutMode;
+  windowPreset?: WindowPresetId;
   onActiveToolChange?: (tool: ViewerTool) => void;
   onHuMeasurementChange?: (state: HuMeasurementPanelState) => void;
   onMaskOverlayStatusChange?: (status: MaskOverlayStatus) => void;
+  onViewerModeChange?: (mode: ViewerLayoutMode) => void;
+  onWindowPresetChange?: (preset: WindowPresetId) => void;
   className?: string;
 };
 
@@ -121,9 +131,14 @@ export function CornerstoneViewer({
   onActiveToolChange,
   onHuMeasurementChange,
   onMaskOverlayStatusChange,
+  onViewerModeChange,
+  onWindowPresetChange,
   segmentationUrl,
+  showControls,
   studyId,
   source,
+  viewerMode,
+  windowPreset,
 }: CornerstoneViewerProps) {
   if (!isReady || !source) {
     return (
@@ -148,9 +163,14 @@ export function CornerstoneViewer({
         onActiveToolChange={onActiveToolChange}
         onHuMeasurementChange={onHuMeasurementChange}
         onMaskOverlayStatusChange={onMaskOverlayStatusChange}
+        onViewerModeChange={onViewerModeChange}
+        onWindowPresetChange={onWindowPresetChange}
         segmentationUrl={segmentationUrl}
+        showControls={showControls}
         source={source}
         studyId={studyId}
+        viewerMode={viewerMode}
+        windowPreset={windowPreset}
       />
     );
   }
@@ -171,6 +191,9 @@ export function CornerstoneViewer({
       imageIds={source.imageIds}
       isMaskVisible={isMaskVisible}
       segmentationUrl={segmentationUrl}
+      showControls={showControls}
+      windowPreset={windowPreset}
+      onWindowPresetChange={onWindowPresetChange}
     />
   );
 }

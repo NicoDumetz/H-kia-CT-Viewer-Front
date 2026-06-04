@@ -17,7 +17,17 @@
 
 import Api from "~/helpers/api/index";
 import type { ApiRequest } from "~/types/api";
-import type { Segmentation, SegmentationListResponse } from "~/types/Segmentations";
+import type {
+  Segmentation,
+  SegmentationLabelsDocument,
+  SegmentationListResponse,
+} from "~/types/Segmentations";
+
+export type ManualSegmentationUploadOptions = {
+  name?: string;
+  labelsJson?: string;
+  labelsFile?: File;
+};
 
 export class Segmentations {
   static getSegmentations(studyId: string): ApiRequest<SegmentationListResponse> {
@@ -32,20 +42,43 @@ export class Segmentations {
     );
   }
 
-  static uploadSegmentation(studyId: string, file: File, name?: string): ApiRequest<Segmentation> {
+  static getSegmentationLabels(
+    studyId: string,
+    segmentationId: string,
+  ): ApiRequest<SegmentationLabelsDocument> {
+    return Api.get<SegmentationLabelsDocument>(
+      `/studies/${encodeURIComponent(studyId)}/segmentations/${encodeURIComponent(segmentationId)}/labels`,
+    );
+  }
+
+  static uploadManualSegmentation(
+    studyId: string,
+    file: File,
+    options: ManualSegmentationUploadOptions = {},
+  ): ApiRequest<Segmentation> {
     const formData = new FormData();
 
     formData.append("file", file);
 
-    if (name) {
-      formData.append("name", name);
+    if (options.name) {
+      formData.append("name", options.name);
     }
 
-    formData.append("source", "manual_upload");
+    if (options.labelsJson) {
+      formData.append("labels_json", options.labelsJson);
+    }
+
+    if (options.labelsFile) {
+      formData.append("labels", options.labelsFile);
+    }
 
     return Api.post<Segmentation, FormData>(
-      `/studies/${encodeURIComponent(studyId)}/segmentations/upload`,
+      `/studies/${encodeURIComponent(studyId)}/segmentations/manual`,
       formData,
     );
+  }
+
+  static uploadSegmentation(studyId: string, file: File, name?: string): ApiRequest<Segmentation> {
+    return Segmentations.uploadManualSegmentation(studyId, file, { name });
   }
 }

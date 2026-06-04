@@ -15,22 +15,21 @@
 //
 // =============================================================
 
-import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { Ai, Segmentations, Studies, Workspace as WorkspaceApi } from "~/api";
 import {
-  Badge,
   Button,
   ErrorState,
   LoadingState,
 } from "~/components";
 import {
   CornerstoneViewer,
-  MaskLabelsPanel,
-  SegmentationUpload,
-  ViewerToolsPanel,
+  LeftStudyPanel,
+  RightSegmentationPanel,
+  TopToolBar,
+  ViewerShell,
 } from "./components";
 import type {
   CornerstoneViewerSource,
@@ -40,10 +39,17 @@ import type {
   ViewerAction,
   ViewerActionRequest,
   ViewerCrosshairTarget,
+  ViewerLayoutMode,
   ViewerTool,
+  WindowPresetId,
 } from "./components";
 import type { AiRunCreate } from "~/types/Ai";
-import type { StudyViewerResponse, StudyVolumeResponse, ViewerDicomSeries } from "~/types/Studies";
+import type {
+  Study,
+  StudyViewerResponse,
+  StudyVolumeResponse,
+  ViewerDicomSeries,
+} from "~/types/Studies";
 import type { StudyWorkspace } from "~/types/Workspace";
 
 const simulationModuleId = "ct_anatomy_segmentation_nnunet";
@@ -185,6 +191,7 @@ function getCornerstoneSource({
 }): CornerstoneViewerSource | null {
   if (volume?.volume.url) {
     return {
+      metadata: volume.volume.metadata,
       type: "nifti",
       url: toFrontendApiUrl(volume.volume.url),
       name: volume.volume.filename,
@@ -209,38 +216,38 @@ function getCornerstoneSource({
   return null;
 }
 
-function getMaskLabelColor(labelId: number) {
-  const hue = (labelId * 47) % 360;
-
-  return `hsl(${hue}, 78%, 54%)`;
-}
-
-function getMaskPanelOverlayStatus(
-  status: MaskOverlayStatus,
-): "available" | "unavailable" | "loading" {
-  if (status === "loading") {
-    return "loading";
-  }
-
-  if (status === "active" || status === "hidden") {
-    return "available";
-  }
-
-  return "unavailable";
-}
-
 function createMaskLabelStates(workspace: StudyWorkspace | null): MaskLabelState[] {
   const labels = workspace?.segmentations.latest?.metadata.labels || [];
 
-  return labels.map((label) => ({
-    centerIjk: label.center_ijk,
-    color: getMaskLabelColor(label.label_id),
-    isVisible: true,
-    labelId: label.label_id,
-    name: label.name || `label_${label.label_id}`,
-    volumeMm3: label.volume_mm3,
-    voxelCount: label.voxel_count,
-  }));
+  return labels
+    .map((label) => {
+      const labelRecord = label as typeof label & {
+        center_world?: number[] | null;
+      };
+      const labelId = label.id || label.label_id;
+      const isPresent = label.present !== false;
+
+      return {
+        bboxIjk: label.bbox_ijk,
+        centerIjk: label.center_ijk,
+        centerWorld: labelRecord.center_world,
+        color: label.color || `hsl(${(labelId * 47) % 360}, 78%, 54%)`,
+        group: label.group || "other",
+        isPresent,
+        isVisible: isPresent,
+        labelId,
+        name: label.name || `label_${labelId}`,
+        volumeMm3: label.volume_mm3,
+        voxelCount: label.voxel_count,
+      };
+    })
+    .sort((left, right) => {
+      if (left.isPresent !== right.isPresent) {
+        return left.isPresent ? -1 : 1;
+      }
+
+      return left.name.localeCompare(right.name);
+    });
 }
 
 function getCrosshairTargetFromLabel(
@@ -258,55 +265,14 @@ function getCrosshairTargetFromLabel(
   const maxY = Math.max(1, (shape[1] || 1) - 1);
 
   return {
+    sliceIndices: {
+      axial: centerIjk[2],
+      coronal: centerIjk[1],
+      sagittal: centerIjk[0],
+    },
     x: Math.max(0, Math.min(1, centerIjk[0] / maxX)),
     y: Math.max(0, Math.min(1, centerIjk[1] / maxY)),
   };
-}
-
-function WorkspaceHeader({
-  onBack,
-  onRefresh,
-  status,
-}: {
-  status: string;
-  onBack: () => void;
-  onRefresh: () => void;
-}) {
-  return (
-    <header className="z-10 flex h-14 items-center justify-between border-b border-border bg-surface px-4 shadow-sm">
-      <h1 className="text-sm font-semibold tracking-wide text-text">Hekia CT Viewer</h1>
-
-      <div className="flex items-center gap-2">
-        <Badge className="border border-border-soft bg-surface-200" variant="muted">
-          {status}
-        </Badge>
-        <Button onClick={onRefresh} size="sm" variant="ghost">
-          Actualiser
-        </Button>
-        <Button onClick={onBack} size="sm" variant="outline">
-          Retour import
-        </Button>
-      </div>
-    </header>
-  );
-}
-
-function LocalPanel({ children, title }: { title: string; children: ReactNode }) {
-  return (
-    <section className="border-b border-border-soft px-5 py-4 last:border-b-0">
-      <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-text-muted">{title}</h2>
-      <div className="space-y-3 text-sm">{children}</div>
-    </section>
-  );
-}
-
-function StatusRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between gap-4">
-      <span className="text-text-muted">{label}</span>
-      <span className="font-medium text-text">{value}</span>
-    </div>
-  );
 }
 
 function MedicalViewerShell({
@@ -325,10 +291,14 @@ function MedicalViewerShell({
   onHuMeasurementChange,
   onMaskOverlayStatusChange,
   onPrepareVolume,
+  onViewerModeChange,
+  onWindowPresetChange,
   segmentationUrl,
   studyId,
   viewer,
+  viewerMode,
   volume,
+  windowPreset,
 }: {
   viewer: StudyViewerResponse | null;
   volume: StudyVolumeResponse | null;
@@ -349,6 +319,10 @@ function MedicalViewerShell({
   onPrepareVolume: () => void;
   segmentationUrl: string | null;
   studyId: string;
+  viewerMode: ViewerLayoutMode;
+  windowPreset: WindowPresetId;
+  onViewerModeChange: (mode: ViewerLayoutMode) => void;
+  onWindowPresetChange: (preset: WindowPresetId) => void;
 }) {
   const cornerstoneSource = useMemo(
     () => getCornerstoneSource({ allowDicomFallback, viewer, volume }),
@@ -402,135 +376,15 @@ function MedicalViewerShell({
       onActiveToolChange={onActiveToolChange}
       onHuMeasurementChange={onHuMeasurementChange}
       onMaskOverlayStatusChange={onMaskOverlayStatusChange}
+      onViewerModeChange={onViewerModeChange}
+      onWindowPresetChange={onWindowPresetChange}
       segmentationUrl={segmentationUrl}
+      showControls={false}
       source={cornerstoneSource}
       studyId={studyId}
+      viewerMode={viewerMode}
+      windowPreset={windowPreset}
     />
-  );
-}
-
-function WorkspaceSidePanel({
-  activeTool,
-  huMeasurementState,
-  isAiPredicting,
-  isBusy,
-  isMaskVisible,
-  maskLabels,
-  maskLabelsMessage,
-  maskOverlayStatus,
-  maskOpacity,
-  onActiveToolChange,
-  onCenterMaskLabel,
-  onMaskOpacityChange,
-  onRunAiPrediction,
-  onToggleMaskLabel,
-  onToggleMask,
-  onUploadSegmentation,
-  onViewerAction,
-  workspace,
-}: {
-  workspace: StudyWorkspace;
-  activeTool: ViewerTool;
-  huMeasurementState: HuMeasurementPanelState;
-  isMaskVisible: boolean;
-  isAiPredicting: boolean;
-  isBusy: boolean;
-  maskLabels: MaskLabelState[];
-  maskLabelsMessage: string | null;
-  maskOverlayStatus: MaskOverlayStatus;
-  maskOpacity: number;
-  onActiveToolChange: (tool: ViewerTool) => void;
-  onCenterMaskLabel: (labelId: number) => void;
-  onMaskOpacityChange: (opacity: number) => void;
-  onRunAiPrediction: () => void;
-  onToggleMaskLabel: (labelId: number) => void;
-  onToggleMask: () => void;
-  onUploadSegmentation: (file: File, name?: string) => void;
-  onViewerAction: (action: ViewerAction) => void;
-}) {
-  const latestSegmentation = workspace.segmentations.latest;
-  const isUploadDisabled = isBusy || !workspace.volume.is_prepared;
-  const canRunAi = workspace.available_actions.can_create_ai_run && workspace.volume.is_prepared;
-  const hasSegmentation = Boolean(latestSegmentation);
-  const isMaskButtonDisabled =
-    !hasSegmentation ||
-    maskOverlayStatus === "loading" ||
-    maskOverlayStatus === "unavailable" ||
-    maskOverlayStatus === "idle";
-  const maskButtonLabel = (() => {
-    if (!hasSegmentation || maskOverlayStatus === "unavailable" || maskOverlayStatus === "idle") {
-      return "Overlay indisponible";
-    }
-
-    if (maskOverlayStatus === "loading") {
-      return "Chargement masque";
-    }
-
-    return isMaskVisible && maskOverlayStatus === "active" ? "Masquer masque" : "Afficher masque";
-  })();
-
-  return (
-    <aside className="flex w-[360px] flex-shrink-0 flex-col overflow-y-auto border-l border-border-soft bg-surface">
-      <LocalPanel title="Examen">
-        <StatusRow
-          label="Volume"
-          value={workspace.volume.is_prepared ? "prêt" : "préparation"}
-        />
-        <StatusRow label="Segmentation" value={hasSegmentation ? "oui" : "non"} />
-      </LocalPanel>
-
-      <LocalPanel title="IA">
-        <Button
-          disabled={!canRunAi || isBusy}
-          fullWidth
-          isLoading={isAiPredicting}
-          onClick={onRunAiPrediction}
-          variant="primary"
-        >
-          {isAiPredicting ? "Prediction en cours..." : "Lancer prediction IA"}
-        </Button>
-      </LocalPanel>
-
-      <LocalPanel title="Outils">
-        <ViewerToolsPanel
-          activeTool={activeTool}
-          disabled={!workspace.volume.is_prepared}
-          huMeasurementState={huMeasurementState}
-          onAction={onViewerAction}
-          onToolChange={onActiveToolChange}
-        />
-      </LocalPanel>
-
-      <LocalPanel title="Masque">
-        <Button
-          disabled={isMaskButtonDisabled}
-          fullWidth
-          onClick={onToggleMask}
-          variant="soft"
-        >
-          {maskButtonLabel}
-        </Button>
-        <MaskLabelsPanel
-          labels={maskLabels}
-          onCenterLabel={onCenterMaskLabel}
-          onOpacityChange={onMaskOpacityChange}
-          onToggleLabel={onToggleMaskLabel}
-          opacity={maskOpacity}
-          overlayStatus={getMaskPanelOverlayStatus(maskOverlayStatus)}
-        />
-        {maskLabelsMessage ? (
-          <p className="text-xs leading-relaxed text-text-muted">{maskLabelsMessage}</p>
-        ) : null}
-        <div className="rounded border border-border-soft bg-surface-100 p-3">
-          <SegmentationUpload isBusy={isUploadDisabled} onUpload={onUploadSegmentation} />
-          {!workspace.volume.is_prepared ? (
-            <p className="mt-3 text-xs text-quaternary-100">
-              Preparez le volume avant d'importer un masque.
-            </p>
-          ) : null}
-        </div>
-      </LocalPanel>
-    </aside>
   );
 }
 
@@ -538,6 +392,7 @@ export default function Workspace() {
   const navigate = useNavigate();
   const { studyId } = useParams<{ studyId: string }>();
   const [workspace, setWorkspace] = useState<StudyWorkspace | null>(null);
+  const [studies, setStudies] = useState<Study[]>([]);
   const [viewer, setViewer] = useState<StudyViewerResponse | null>(null);
   const [volume, setVolume] = useState<StudyVolumeResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -546,6 +401,8 @@ export default function Workspace() {
   const [isAutoPreparing, setIsAutoPreparing] = useState(false);
   const [isMaskVisible, setIsMaskVisible] = useState(true);
   const [activeViewerTool, setActiveViewerTool] = useState<ViewerTool>("crosshair");
+  const [viewerMode, setViewerMode] = useState<ViewerLayoutMode>("mpr");
+  const [windowPreset, setWindowPreset] = useState<WindowPresetId>("soft");
   const [viewerActionRequest, setViewerActionRequest] = useState<ViewerActionRequest | null>(null);
   const [crosshairTarget, setCrosshairTarget] = useState<ViewerCrosshairTarget | null>(null);
   const [huMeasurementState, setHuMeasurementState] = useState<HuMeasurementPanelState>({
@@ -571,12 +428,16 @@ export default function Workspace() {
       }
 
       try {
-        const workspaceResponse = await WorkspaceApi.getWorkspace(studyId);
+        const [workspaceResponse, studiesResponse] = await Promise.all([
+          WorkspaceApi.getWorkspace(studyId),
+          Studies.getStudies(),
+        ]);
         const nextWorkspace = workspaceResponse.data;
         const nextViewer = normalizeViewer(nextWorkspace.viewer);
         const nextVolume = nextWorkspace.volume.data;
 
         setWorkspace(nextWorkspace);
+        setStudies(studiesResponse.data.items);
         setViewer(nextViewer);
         setVolume(nextVolume);
         setError(null);
@@ -640,7 +501,7 @@ export default function Workspace() {
     }).finally(() => setIsAiPredicting(false));
   };
 
-  const handleUploadSegmentation = (file: File, name?: string) => {
+  const handleUploadSegmentation = (file: File, name?: string, labelsFile?: File) => {
     void runAction(async () => {
       if (!studyId || !workspace) {
         throw new Error("Workspace indisponible.");
@@ -650,7 +511,10 @@ export default function Workspace() {
         throw new Error("Preparez le volume avant d'importer un masque.");
       }
 
-      await Segmentations.uploadSegmentation(studyId, file, name);
+      await Segmentations.uploadManualSegmentation(studyId, file, {
+        labelsFile,
+        name,
+      });
     });
   };
 
@@ -673,6 +537,44 @@ export default function Workspace() {
     }
   }, [maskOverlayStatus]);
 
+  const handleSetAllLabelsVisible = useCallback((visible: boolean) => {
+    setMaskLabels((currentLabels) =>
+      currentLabels.map((label) => ({
+        ...label,
+        isVisible: label.isPresent ? visible : false,
+      })),
+    );
+    setMaskLabelsMessage(null);
+  }, []);
+
+  const handleSetGroupVisible = useCallback((group: string, visible: boolean) => {
+    setMaskLabels((currentLabels) =>
+      currentLabels.map((label) =>
+        label.group === group
+          ? {
+              ...label,
+              isVisible: label.isPresent ? visible : false,
+            }
+          : label,
+      ),
+    );
+    setMaskLabelsMessage(null);
+  }, []);
+
+  const handleShowOnlyGroup = useCallback((group: string) => {
+    const visibleGroups = group === "vertebrae" ? new Set(["vertebrae", "sacrum"]) : new Set([group]);
+
+    setMaskLabels((currentLabels) =>
+      currentLabels.map((label) => ({
+        ...label,
+        isVisible: label.isPresent && visibleGroups.has(label.group),
+      })),
+    );
+    setMaskLabelsMessage(
+      group === "vertebrae" ? "Labels vertébraux et sacrum visibles." : null,
+    );
+  }, []);
+
   const handleMaskOpacityChange = useCallback((opacity: number) => {
     setMaskOpacity(opacity);
 
@@ -685,6 +587,12 @@ export default function Workspace() {
 
   const handleCenterMaskLabel = useCallback((labelId: number) => {
     const selectedLabel = maskLabels.find((label) => label.labelId === labelId);
+
+    if (!selectedLabel?.isPresent) {
+      setMaskLabelsMessage("Label absent dans cette segmentation.");
+      return;
+    }
+
     const nextCrosshairTarget = getCrosshairTargetFromLabel(selectedLabel, volume);
 
     setMaskLabels((currentLabels) =>
@@ -697,7 +605,7 @@ export default function Workspace() {
     setCrosshairTarget(nextCrosshairTarget);
     setMaskLabelsMessage(
       nextCrosshairTarget
-        ? "Repère placé sur le centre estimé du label."
+        ? "Vue déplacée sur le centre estimé du label."
         : "Centrage label à brancher.",
     );
   }, [maskLabels, volume]);
@@ -732,6 +640,8 @@ export default function Workspace() {
   useEffect(() => {
     setHuMeasurementState({ status: "idle" });
     setCrosshairTarget(null);
+    setViewerMode("mpr");
+    setWindowPreset("soft");
   }, [studyId]);
 
   useEffect(() => {
@@ -818,48 +728,60 @@ export default function Workspace() {
   const canPrepareVolume = getEffectiveCanPrepareVolume(workspace);
   const isWorkspaceBusy = isBusy || isAutoPreparing;
   const allowDicomFallback = !workspace.volume.is_prepared && !canPrepareVolume && !isWorkspaceBusy;
+  const nnunetModule = workspace.ai.modules.find((module) => module.id === simulationModuleId);
+  const canRunAi =
+    workspace.available_actions.can_create_ai_run &&
+    workspace.volume.is_prepared &&
+    Boolean(nnunetModule?.is_available);
+  const aiUnavailableMessage = nnunetModule?.availability_error || null;
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-background font-manrope text-text">
-      <WorkspaceHeader
-        onBack={() => navigate("/import")}
-        onRefresh={() => void loadWorkspace(true)}
-        status={workspace.study.status}
-      />
-
-      {error ? (
-        <div className="border-b border-quaternary-700 bg-quaternary-700/20 p-2 text-center text-sm text-quaternary-100">
-          {error}
-        </div>
-      ) : null}
-
-      <main className="flex flex-1 overflow-hidden">
-        <section className="min-w-0 flex-1 border-r border-border bg-viewer">
-          <MedicalViewerShell
-            actionRequest={viewerActionRequest}
-            activeTool={activeViewerTool}
-            allowDicomFallback={allowDicomFallback}
-            canPrepareVolume={canPrepareVolume}
-            crosshairTarget={crosshairTarget}
-            error={error}
-            inputType={workspace.study.input_type}
-            isBusy={isWorkspaceBusy}
-            isMaskVisible={isMaskVisible}
-            maskLabels={maskLabels}
-            maskOpacity={maskOpacity}
-            onActiveToolChange={handleActiveViewerToolChange}
-            onHuMeasurementChange={setHuMeasurementState}
-            onMaskOverlayStatusChange={setMaskOverlayStatus}
-            onPrepareVolume={handlePrepareVolume}
-            segmentationUrl={segmentationUrl}
-            studyId={studyId}
-            viewer={viewer}
-            volume={volume}
-          />
-        </section>
-
-        <WorkspaceSidePanel
+    <ViewerShell
+      center={
+        <MedicalViewerShell
+          actionRequest={viewerActionRequest}
           activeTool={activeViewerTool}
+          allowDicomFallback={allowDicomFallback}
+          canPrepareVolume={canPrepareVolume}
+          crosshairTarget={crosshairTarget}
+          error={error}
+          inputType={workspace.study.input_type}
+          isBusy={isWorkspaceBusy}
+          isMaskVisible={isMaskVisible}
+          maskLabels={maskLabels}
+          maskOpacity={maskOpacity}
+          onActiveToolChange={handleActiveViewerToolChange}
+          onHuMeasurementChange={setHuMeasurementState}
+          onMaskOverlayStatusChange={setMaskOverlayStatus}
+          onPrepareVolume={handlePrepareVolume}
+          onViewerModeChange={setViewerMode}
+          onWindowPresetChange={setWindowPreset}
+          segmentationUrl={segmentationUrl}
+          studyId={studyId}
+          viewer={viewer}
+          viewerMode={viewerMode}
+          volume={volume}
+          windowPreset={windowPreset}
+        />
+      }
+      error={error}
+      leftPanel={
+        <LeftStudyPanel
+          currentStudyId={studyId}
+          onOpenStudy={(nextStudyId) =>
+            navigate(`/studies/${encodeURIComponent(nextStudyId)}/workspace`)
+          }
+          studies={studies}
+          viewer={viewer}
+          volume={volume}
+          workspace={workspace}
+        />
+      }
+      rightPanel={
+        <RightSegmentationPanel
+          activeTool={activeViewerTool}
+          aiUnavailableMessage={aiUnavailableMessage}
+          canRunAi={canRunAi}
           huMeasurementState={huMeasurementState}
           isAiPredicting={isAiPredicting}
           isBusy={isWorkspaceBusy}
@@ -868,17 +790,37 @@ export default function Workspace() {
           maskLabelsMessage={maskLabelsMessage}
           maskOverlayStatus={maskOverlayStatus}
           maskOpacity={maskOpacity}
-          onActiveToolChange={handleActiveViewerToolChange}
           onCenterMaskLabel={handleCenterMaskLabel}
           onMaskOpacityChange={handleMaskOpacityChange}
           onRunAiPrediction={handleRunAiPrediction}
-          onToggleMaskLabel={handleToggleMaskLabel}
+          onSetAllLabelsVisible={handleSetAllLabelsVisible}
+          onSetGroupVisible={handleSetGroupVisible}
+          onShowOnlyGroup={handleShowOnlyGroup}
           onToggleMask={() => setIsMaskVisible((value) => !value)}
+          onToggleMaskLabel={handleToggleMaskLabel}
           onUploadSegmentation={handleUploadSegmentation}
-          onViewerAction={handleViewerAction}
           workspace={workspace}
         />
-      </main>
-    </div>
+      }
+      toolbar={
+        <TopToolBar
+          activeTool={activeViewerTool}
+          canRunAi={canRunAi}
+          isAiPredicting={isAiPredicting}
+          isBusy={isWorkspaceBusy}
+          onBack={() => navigate("/import")}
+          onImport={() => navigate("/import")}
+          onRefresh={() => void loadWorkspace(true)}
+          onRunAiPrediction={handleRunAiPrediction}
+          onToolChange={handleActiveViewerToolChange}
+          onViewerAction={handleViewerAction}
+          onViewerModeChange={setViewerMode}
+          onWindowPresetChange={setWindowPreset}
+          status={workspace.study.status}
+          viewerMode={viewerMode}
+          windowPreset={windowPreset}
+        />
+      }
+    />
   );
 }

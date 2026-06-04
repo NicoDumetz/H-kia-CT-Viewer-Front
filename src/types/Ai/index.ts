@@ -27,8 +27,9 @@ export type AiModule = {
   input_type: string;
   output_type: string;
   is_available: boolean;
+  availability_error: string | null;
   runner: AiModuleRunner | string;
-  labels: Record<string, string> | null;
+  labels: string[] | null;
 };
 
 export type AiModuleListResponse = {
