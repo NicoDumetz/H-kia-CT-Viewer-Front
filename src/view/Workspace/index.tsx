@@ -33,7 +33,6 @@ import {
 } from "./components";
 import type {
   CornerstoneViewerSource,
-  HuMeasurementPanelState,
   MaskLabelState,
   MaskOverlayStatus,
   ViewerAction,
@@ -43,6 +42,9 @@ import type {
   ViewerTool,
   WindowPresetId,
 } from "./components";
+import { getMeasurementPrimaryPoint } from "./measurements/measurementGeometry";
+import type { MedicalMeasurement } from "./measurements/measurementTypes";
+import { useMeasurements } from "./measurements/useMeasurements";
 import type { AiRunCreate } from "~/types/Ai";
 import type {
   Study,
@@ -277,6 +279,42 @@ function getCrosshairTargetFromLabel(
   };
 }
 
+function getCrosshairTargetFromMeasurement(
+  measurement: MedicalMeasurement,
+  volume: StudyVolumeResponse | null,
+): ViewerCrosshairTarget | null {
+  const primaryPoint = getMeasurementPrimaryPoint(measurement);
+  const voxel = primaryPoint.voxel;
+  const shape = volume?.volume.metadata.shape;
+
+  if (!voxel || !shape || shape.length < 3) {
+    if (!primaryPoint.world) {
+      return null;
+    }
+
+    return {
+      world: primaryPoint.world,
+      x: 0.5,
+      y: 0.5,
+    };
+  }
+
+  const maxX = Math.max(1, (shape[0] || 1) - 1);
+  const maxY = Math.max(1, (shape[1] || 1) - 1);
+
+  return {
+    sliceIndices: {
+      axial: voxel[2],
+      coronal: voxel[1],
+      sagittal: voxel[0],
+    },
+    voxel,
+    world: primaryPoint.world,
+    x: Math.max(0, Math.min(1, voxel[0] / maxX)),
+    y: Math.max(0, Math.min(1, voxel[1] / maxY)),
+  };
+}
+
 function MedicalViewerShell({
   actionRequest,
   activeTool,
@@ -289,13 +327,16 @@ function MedicalViewerShell({
   inputType,
   maskLabels,
   maskOpacity,
+  measurements,
+  onAddMeasurement,
   onActiveToolChange,
-  onHuMeasurementChange,
   onMaskOverlayStatusChange,
   onPrepareVolume,
+  onSelectMeasurement,
   onViewerModeChange,
   onWindowPresetChange,
   segmentationUrl,
+  selectedMeasurementId,
   studyId,
   viewer,
   viewerMode,
@@ -315,9 +356,12 @@ function MedicalViewerShell({
   inputType: string;
   maskLabels: MaskLabelState[];
   maskOpacity: number;
+  measurements: MedicalMeasurement[];
+  selectedMeasurementId: string | null;
+  onAddMeasurement: (measurement: MedicalMeasurement) => void;
   onActiveToolChange: (tool: ViewerTool) => void;
-  onHuMeasurementChange: (state: HuMeasurementPanelState) => void;
   onMaskOverlayStatusChange: (status: MaskOverlayStatus) => void;
+  onSelectMeasurement: (measurementId: string | null) => void;
   onPrepareVolume: () => void;
   segmentationUrl: string | null;
   studyId: string;
@@ -389,12 +433,15 @@ function MedicalViewerShell({
       isReady={isReady}
       maskLabels={maskLabels}
       maskOpacity={maskOpacity}
+      measurements={measurements}
+      onAddMeasurement={onAddMeasurement}
       onActiveToolChange={onActiveToolChange}
-      onHuMeasurementChange={onHuMeasurementChange}
       onMaskOverlayStatusChange={onMaskOverlayStatusChange}
+      onSelectMeasurement={onSelectMeasurement}
       onViewerModeChange={onViewerModeChange}
       onWindowPresetChange={onWindowPresetChange}
       segmentationUrl={segmentationUrl}
+      selectedMeasurementId={selectedMeasurementId}
       showControls={false}
       source={cornerstoneSource}
       studyId={studyId}
@@ -421,9 +468,6 @@ export default function Workspace() {
   const [windowPreset, setWindowPreset] = useState<WindowPresetId>("soft");
   const [viewerActionRequest, setViewerActionRequest] = useState<ViewerActionRequest | null>(null);
   const [crosshairTarget, setCrosshairTarget] = useState<ViewerCrosshairTarget | null>(null);
-  const [huMeasurementState, setHuMeasurementState] = useState<HuMeasurementPanelState>({
-    status: "idle",
-  });
   const [maskLabels, setMaskLabels] = useState<MaskLabelState[]>([]);
   const [maskLabelsMessage, setMaskLabelsMessage] = useState<string | null>(null);
   const [maskOverlayStatus, setMaskOverlayStatus] = useState<MaskOverlayStatus>("idle");
@@ -431,6 +475,14 @@ export default function Workspace() {
   const [error, setError] = useState<string | null>(null);
   const autoPreparedStudyIdsRef = useRef<Set<string>>(new Set());
   const loadRequestIdRef = useRef(0);
+  const {
+    addMeasurement,
+    deleteMeasurement,
+    measurements,
+    resetMeasurements,
+    selectedMeasurementId,
+    selectMeasurement,
+  } = useMeasurements(studyId);
 
   const loadWorkspace = useCallback(
     async (showLoading = false) => {
@@ -642,38 +694,100 @@ export default function Workspace() {
   }, [maskLabels, volume]);
 
   const handleActiveViewerToolChange = useCallback((tool: ViewerTool) => {
-    setActiveViewerTool((currentTool) => {
-      if (tool === "hu" && currentTool === "hu") {
-        setHuMeasurementState({ status: "idle" });
-        return "crosshair";
-      }
-
-      return tool;
-    });
+    setActiveViewerTool(tool);
   }, []);
 
   const handleViewerAction = useCallback((action: ViewerAction) => {
     if (action === "reset") {
       setActiveViewerTool("crosshair");
-      setHuMeasurementState({ status: "idle" });
+      resetMeasurements();
     }
 
     setViewerActionRequest((currentRequest) => ({
       action,
       id: (currentRequest?.id || 0) + 1,
     }));
-  }, []);
+  }, [resetMeasurements]);
+
+  const handleFocusMeasurement = useCallback(
+    (measurement: MedicalMeasurement) => {
+      const nextCrosshairTarget = getCrosshairTargetFromMeasurement(measurement, volume);
+
+      selectMeasurement(measurement.id);
+      setActiveViewerTool("crosshair");
+      setViewerMode("mpr");
+      setCrosshairTarget(nextCrosshairTarget);
+    },
+    [selectMeasurement, volume],
+  );
 
   useEffect(() => {
     void loadWorkspace(true);
   }, [loadWorkspace]);
 
   useEffect(() => {
-    setHuMeasurementState({ status: "idle" });
     setCrosshairTarget(null);
     setViewerMode("mpr");
     setWindowPreset("soft");
   }, [studyId]);
+
+  useEffect(() => {
+    const shortcutByKey: Partial<Record<string, ViewerTool>> = {
+      c: "crosshair",
+      d: "length",
+      h: "hu",
+      p: "pan",
+      r: "circle_roi",
+      s: "none",
+      w: "window",
+      z: "zoom",
+    };
+
+    function isEditableTarget(target: EventTarget | null) {
+      const element = target instanceof HTMLElement ? target : null;
+      const tagName = element?.tagName.toLowerCase();
+
+      return (
+        element?.isContentEditable ||
+        tagName === "input" ||
+        tagName === "textarea" ||
+        tagName === "select"
+      );
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (isEditableTarget(event.target)) {
+        return;
+      }
+
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setActiveViewerTool("crosshair");
+        return;
+      }
+
+      if (event.key === "Delete" || event.key === "Backspace") {
+        if (selectedMeasurementId) {
+          event.preventDefault();
+          deleteMeasurement(selectedMeasurementId);
+        }
+        return;
+      }
+
+      const nextTool = shortcutByKey[event.key.toLowerCase()];
+
+      if (!nextTool) {
+        return;
+      }
+
+      event.preventDefault();
+      setActiveViewerTool(nextTool);
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [deleteMeasurement, selectedMeasurementId]);
 
   useEffect(() => {
     const latestSegmentation = workspace?.segmentations.latest;
@@ -781,13 +895,16 @@ export default function Workspace() {
           isMaskVisible={isMaskVisible}
           maskLabels={maskLabels}
           maskOpacity={maskOpacity}
+          measurements={measurements}
+          onAddMeasurement={addMeasurement}
           onActiveToolChange={handleActiveViewerToolChange}
-          onHuMeasurementChange={setHuMeasurementState}
           onMaskOverlayStatusChange={setMaskOverlayStatus}
+          onSelectMeasurement={selectMeasurement}
           onPrepareVolume={handlePrepareVolume}
           onViewerModeChange={setViewerMode}
           onWindowPresetChange={setWindowPreset}
           segmentationUrl={segmentationUrl}
+          selectedMeasurementId={selectedMeasurementId}
           studyId={studyId}
           viewer={viewer}
           viewerMode={viewerMode}
@@ -813,7 +930,6 @@ export default function Workspace() {
           activeTool={activeViewerTool}
           aiUnavailableMessage={aiUnavailableMessage}
           canRunAi={canRunAi}
-          huMeasurementState={huMeasurementState}
           isAiPredicting={isAiPredicting}
           isBusy={isWorkspaceBusy}
           isMaskVisible={isMaskVisible}
@@ -821,15 +937,21 @@ export default function Workspace() {
           maskLabelsMessage={maskLabelsMessage}
           maskOverlayStatus={maskOverlayStatus}
           maskOpacity={maskOpacity}
+          measurements={measurements}
           onCenterMaskLabel={handleCenterMaskLabel}
+          onDeleteMeasurement={deleteMeasurement}
+          onFocusMeasurement={handleFocusMeasurement}
           onMaskOpacityChange={handleMaskOpacityChange}
+          onResetMeasurements={resetMeasurements}
           onRunAiPrediction={handleRunAiPrediction}
+          onSelectMeasurement={selectMeasurement}
           onSetAllLabelsVisible={handleSetAllLabelsVisible}
           onSetGroupVisible={handleSetGroupVisible}
           onShowOnlyGroup={handleShowOnlyGroup}
           onToggleMask={() => setIsMaskVisible((value) => !value)}
           onToggleMaskLabel={handleToggleMaskLabel}
           onUploadSegmentation={handleUploadSegmentation}
+          selectedMeasurementId={selectedMeasurementId}
           workspace={workspace}
         />
       }

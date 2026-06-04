@@ -45,6 +45,7 @@ const toolButtons: Array<ToolButton<ViewerTool>> = [
   { id: "zoom", icon: "zoom", label: "Zoom" },
   { id: "length", icon: "length", label: "Longueur" },
   { id: "hu", icon: "hu", label: "HU" },
+  { id: "circle_roi", icon: "circle", label: "Circle ROI" },
   { id: "crosshair", icon: "crosshair", label: "Crosshair" },
 ];
 
@@ -56,6 +57,7 @@ const actionButtons: Array<ToolButton<ViewerAction>> = [
 
 type IconName =
   | "capture"
+  | "circle"
   | "contrast"
   | "crosshair"
   | "hu"
@@ -66,8 +68,9 @@ type IconName =
   | "zoom";
 
 const toolHelp: Record<ViewerTool, string> = {
+  circle_roi: "Cliquez-glissez pour créer une ROI circulaire HU.",
   crosshair: "Cliquez dans une vue pour déplacer le repère.",
-  hu: "Cliquez pour placer le centre, déplacez pour définir le rayon, recliquez pour valider.",
+  hu: "Cliquez pour poser une probe HU persistante.",
   length: "Tracez une distance entre deux points.",
   none: "",
   pan: "Cliquez-glissez pour déplacer la coupe.",
@@ -176,6 +179,15 @@ function ToolIcon({ name }: { name: IconName }) {
         <circle cx="12" cy="12" r="7" />
         <path d="M9 12h6" />
         <path d="M12 9v6" />
+      </svg>
+    );
+  }
+
+  if (name === "circle") {
+    return (
+      <svg {...commonProps}>
+        <circle cx="12" cy="12" r="7" />
+        <circle cx="12" cy="12" fill="currentColor" r="1.75" stroke="none" />
       </svg>
     );
   }

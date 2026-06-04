@@ -26,6 +26,7 @@ import MouseRoundedIcon from "@mui/icons-material/MouseRounded";
 import OpenWithRoundedIcon from "@mui/icons-material/OpenWithRounded";
 import PhotoCameraRoundedIcon from "@mui/icons-material/PhotoCameraRounded";
 import PsychologyRoundedIcon from "@mui/icons-material/PsychologyRounded";
+import RadioButtonUncheckedRoundedIcon from "@mui/icons-material/RadioButtonUncheckedRounded";
 import RefreshRoundedIcon from "@mui/icons-material/RefreshRounded";
 import RestartAltRoundedIcon from "@mui/icons-material/RestartAltRounded";
 import StraightenRoundedIcon from "@mui/icons-material/StraightenRounded";
@@ -77,15 +78,27 @@ const viewerTools: Array<ToolbarItem<ViewerTool>> = [
   {
     id: "length",
     icon: <StraightenRoundedIcon fontSize="small" />,
-    isEnabled: false,
-    label: "Length - à venir",
+    label: "Distance",
   },
   {
     id: "hu",
     icon: <FilterCenterFocusRoundedIcon fontSize="small" />,
-    isEnabled: false,
-    label: "HU ROI - à venir",
+    label: "HU Probe",
   },
+  {
+    id: "circle_roi",
+    icon: <RadioButtonUncheckedRoundedIcon fontSize="small" />,
+    label: "Circle ROI",
+  },
+];
+
+const disabledMeasurementTools: ToolbarItem<string>[] = [
+  { id: "angle", icon: <span>ANG</span>, isEnabled: false, label: "Angle - à venir" },
+  { id: "rect_roi", icon: <span>RECT</span>, isEnabled: false, label: "Rectangle ROI - à venir" },
+  { id: "ellipse_roi", icon: <span>ELL</span>, isEnabled: false, label: "Ellipse ROI - à venir" },
+  { id: "freehand_roi", icon: <span>FH</span>, isEnabled: false, label: "Freehand ROI - à venir" },
+  { id: "text", icon: <span>T</span>, isEnabled: false, label: "Text annotation - à venir" },
+  { id: "arrow", icon: <span>AR</span>, isEnabled: false, label: "Arrow annotation - à venir" },
 ];
 
 const viewerActions: Array<ToolbarItem<ViewerAction>> = [
@@ -229,6 +242,16 @@ export function TopToolBar({
         >
           <MouseRoundedIcon fontSize="small" />
         </CompactButton>
+        {disabledMeasurementTools.map((tool) => (
+          <CompactButton
+            disabled
+            key={tool.id}
+            label={tool.label}
+            onClick={() => undefined}
+          >
+            {tool.icon}
+          </CompactButton>
+        ))}
       </ToolbarGroup>
 
       <ToolbarGroup>

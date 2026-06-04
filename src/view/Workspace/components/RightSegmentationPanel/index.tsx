@@ -18,21 +18,18 @@
 import type { ReactNode } from "react";
 
 import { SegmentationLabelPanel } from "../MaskLabelsPanel";
-import type {
-  HuMeasurementPanelState,
-  MaskOverlayStatus,
-  ViewerTool,
-} from "../CornerstoneViewer";
+import { MeasurementsPanel } from "../MeasurementsPanel";
+import type { MaskOverlayStatus, ViewerTool } from "../CornerstoneViewer";
 import type { MaskLabelState } from "../MaskLabelsPanel";
 import { SegmentationUpload } from "../SegmentationUpload";
 import { cn } from "~/helpers/Cn";
 import type { StudyWorkspace } from "~/types/Workspace";
+import type { MedicalMeasurement } from "../../measurements/measurementTypes";
 
 type RightSegmentationPanelProps = {
   activeTool: ViewerTool;
   aiUnavailableMessage: string | null;
   canRunAi: boolean;
-  huMeasurementState: HuMeasurementPanelState;
   isAiPredicting: boolean;
   isBusy: boolean;
   isMaskVisible: boolean;
@@ -40,10 +37,16 @@ type RightSegmentationPanelProps = {
   maskLabelsMessage: string | null;
   maskOverlayStatus: MaskOverlayStatus;
   maskOpacity: number;
+  measurements: MedicalMeasurement[];
+  selectedMeasurementId: string | null;
   workspace: StudyWorkspace;
   onCenterMaskLabel: (labelId: number) => void;
+  onDeleteMeasurement: (measurementId: string) => void;
+  onFocusMeasurement: (measurement: MedicalMeasurement) => void;
   onMaskOpacityChange: (opacity: number) => void;
+  onResetMeasurements: () => void;
   onRunAiPrediction: () => void;
+  onSelectMeasurement: (measurementId: string | null) => void;
   onSetAllLabelsVisible: (visible: boolean) => void;
   onSetGroupVisible: (group: string, visible: boolean) => void;
   onShowOnlyGroup: (group: string) => void;
@@ -83,69 +86,32 @@ function getMaskPanelOverlayStatus(
   return "unavailable";
 }
 
-function formatHuValue(value: number) {
-  return `${Math.round(value)} HU`;
-}
-
-function HuMeasurementSummary({
-  activeTool,
-  state,
-}: {
-  activeTool: ViewerTool;
-  state: HuMeasurementPanelState;
-}) {
-  if (state.status === "loading") {
-    return <p className="text-xs text-text-muted">Calcul HU en cours...</p>;
-  }
-
-  if (state.status === "error") {
-    return <p className="text-xs text-quaternary-100">{state.message}</p>;
-  }
-
-  if (state.status === "success") {
-    return (
-      <div className="space-y-1 text-xs leading-relaxed text-text-muted">
-        <p className="font-semibold text-text">Mesure HU</p>
-        <p>Moyenne : {formatHuValue(state.result.hu.mean)}</p>
-        <p>Médiane : {formatHuValue(state.result.hu.median)}</p>
-        <p>
-          Min / Max : {formatHuValue(state.result.hu.min)} / {formatHuValue(state.result.hu.max)}
-        </p>
-        <p>Surface : {Math.round(state.result.area_mm2)} mm2</p>
-      </div>
-    );
-  }
-
-  return (
-    <p className="text-xs leading-relaxed text-text-muted">
-      {activeTool === "hu"
-        ? "Cliquez dans une vue pour placer la ROI HU."
-        : "HU ROI à venir. Les outils actifs sont scroll, window/level, pan, zoom, crosshair et reset."}
-    </p>
-  );
-}
-
 export function RightSegmentationPanel({
   activeTool,
   aiUnavailableMessage,
   canRunAi,
-  huMeasurementState,
   isAiPredicting,
   isBusy,
   isMaskVisible,
   maskLabels,
   maskLabelsMessage,
+  measurements,
   maskOpacity,
   maskOverlayStatus,
   onCenterMaskLabel,
+  onDeleteMeasurement,
+  onFocusMeasurement,
   onMaskOpacityChange,
+  onResetMeasurements,
   onRunAiPrediction,
+  onSelectMeasurement,
   onSetAllLabelsVisible,
   onSetGroupVisible,
   onShowOnlyGroup,
   onToggleMask,
   onToggleMaskLabel,
   onUploadSegmentation,
+  selectedMeasurementId,
   workspace,
 }: RightSegmentationPanelProps) {
   const latestSegmentation = workspace.segmentations.latest;
@@ -211,6 +177,22 @@ export function RightSegmentationPanel({
         ) : null}
       </PanelSection>
 
+      <PanelSection title="Measurements">
+        <MeasurementsPanel
+          measurements={measurements}
+          onDeleteMeasurement={onDeleteMeasurement}
+          onFocusMeasurement={onFocusMeasurement}
+          onResetMeasurements={onResetMeasurements}
+          onSelectMeasurement={onSelectMeasurement}
+          selectedMeasurementId={selectedMeasurementId}
+        />
+        {activeTool === "length" || activeTool === "hu" || activeTool === "circle_roi" ? (
+          <p className="mt-2 text-[11px] leading-relaxed text-text-muted">
+            Outil actif : {activeTool === "hu" ? "HU Probe" : activeTool}
+          </p>
+        ) : null}
+      </PanelSection>
+
       <PanelSection title="Labels">
         <SegmentationLabelPanel
           labels={maskLabels}
@@ -239,9 +221,6 @@ export function RightSegmentationPanel({
         </div>
       </PanelSection>
 
-      <PanelSection title="HU ROI">
-        <HuMeasurementSummary activeTool={activeTool} state={huMeasurementState} />
-      </PanelSection>
     </aside>
   );
 }

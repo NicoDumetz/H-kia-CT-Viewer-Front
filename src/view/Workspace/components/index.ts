@@ -30,6 +30,8 @@ export type {
 export { LeftStudyPanel } from "./LeftStudyPanel";
 export { MaskLabelsPanel } from "./MaskLabelsPanel";
 export type { MaskLabelState } from "./MaskLabelsPanel";
+export { MeasurementOverlay } from "./MeasurementOverlay";
+export { MeasurementsPanel } from "./MeasurementsPanel";
 export { RightSegmentationPanel } from "./RightSegmentationPanel";
 export { SegmentationUpload } from "./SegmentationUpload";
 export { SliceScrollBar } from "./SliceScrollBar";

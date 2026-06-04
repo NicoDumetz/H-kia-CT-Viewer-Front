@@ -21,6 +21,7 @@ import type { MaskLabelState } from "../MaskLabelsPanel";
 import { cn } from "~/helpers/Cn";
 import type { HuCircleMeasurement } from "~/types/Measurements";
 import type { VolumeMetadata } from "~/types/Studies";
+import type { MedicalMeasurement } from "../../measurements/measurementTypes";
 
 export type ViewerTool =
   | "window"
@@ -28,6 +29,7 @@ export type ViewerTool =
   | "zoom"
   | "length"
   | "hu"
+  | "circle_roi"
   | "crosshair"
   | "none";
 
@@ -93,14 +95,17 @@ type CornerstoneViewerProps = {
   isMaskVisible?: boolean;
   maskLabels?: MaskLabelState[];
   maskOpacity?: number;
+  measurements?: MedicalMeasurement[];
   showControls?: boolean;
   segmentationUrl?: string | null;
+  selectedMeasurementId?: string | null;
   studyId?: string;
   viewerMode?: ViewerLayoutMode;
   windowPreset?: WindowPresetId;
   onActiveToolChange?: (tool: ViewerTool) => void;
-  onHuMeasurementChange?: (state: HuMeasurementPanelState) => void;
+  onAddMeasurement?: (measurement: MedicalMeasurement) => void;
   onMaskOverlayStatusChange?: (status: MaskOverlayStatus) => void;
+  onSelectMeasurement?: (measurementId: string | null) => void;
   onViewerModeChange?: (mode: ViewerLayoutMode) => void;
   onWindowPresetChange?: (preset: WindowPresetId) => void;
   className?: string;
@@ -129,13 +134,16 @@ export function CornerstoneViewer({
   isMaskVisible = true,
   maskLabels = [],
   maskOpacity = 0.6,
+  measurements = [],
   isReady,
+  onAddMeasurement,
   onActiveToolChange,
-  onHuMeasurementChange,
   onMaskOverlayStatusChange,
+  onSelectMeasurement,
   onViewerModeChange,
   onWindowPresetChange,
   segmentationUrl,
+  selectedMeasurementId,
   showControls,
   studyId,
   source,
@@ -162,12 +170,15 @@ export function CornerstoneViewer({
         isMaskVisible={isMaskVisible}
         maskLabels={maskLabels}
         maskOpacity={maskOpacity}
+        measurements={measurements}
+        onAddMeasurement={onAddMeasurement}
         onActiveToolChange={onActiveToolChange}
-        onHuMeasurementChange={onHuMeasurementChange}
         onMaskOverlayStatusChange={onMaskOverlayStatusChange}
+        onSelectMeasurement={onSelectMeasurement}
         onViewerModeChange={onViewerModeChange}
         onWindowPresetChange={onWindowPresetChange}
         segmentationUrl={segmentationUrl}
+        selectedMeasurementId={selectedMeasurementId}
         showControls={showControls}
         source={source}
         studyId={studyId}

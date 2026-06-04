@@ -40,8 +40,8 @@ import {
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { PointerEvent, WheelEvent } from "react";
 
-import { Measurements } from "~/api";
 import { Button } from "~/components/Button";
+import { MeasurementOverlay } from "../MeasurementOverlay";
 import { VTKVolume3DViewer } from "../VTKVolume3DViewer";
 import { SliceScrollBar } from "../SliceScrollBar";
 import {
@@ -51,7 +51,6 @@ import {
 } from "../ViewportGrid";
 import type {
   CornerstoneViewerSource,
-  HuMeasurementPanelState,
   MaskOverlayStatus,
   ViewerActionRequest,
   ViewerCrosshairTarget,
@@ -69,10 +68,20 @@ import {
   releaseDecompressedNiftiUrl,
 } from "~/helpers/Cornerstone";
 import { cn } from "~/helpers/Cn";
+import type { MeasurementPlane } from "~/types/Measurements";
+import {
+  calculateCircleRoiStats,
+  getLengthMm,
+  getPlaneRadiusMm,
+  getSliceIndexForVoxel,
+  toMeasurementPoint,
+  voxelToMeasurementPoint,
+} from "../../measurements/measurementGeometry";
 import type {
-  HuCircleMeasurement,
-  MeasurementPlane,
-} from "~/types/Measurements";
+  MeasurementDraft,
+  MeasurementPoint,
+  MedicalMeasurement,
+} from "../../measurements/measurementTypes";
 
 type ViewerMode = ViewerLayoutMode;
 type VolumeLayout = Exclude<ViewerLayoutMode, "volume3d">;
@@ -150,14 +159,34 @@ type CanvasWorldViewport = Types.IViewport & {
   worldToCanvas?: (worldPos: Types.Point3) => Types.Point2;
 };
 
-type HuCircleDraft = {
+type LengthDraft = {
   viewportId: string;
   plane: MeasurementPlane;
-  centerCanvas: CanvasPoint;
-  edgeCanvas: CanvasPoint | null;
-  centerWorld: number[];
-  edgeWorld: number[] | null;
-  isFinalized: boolean;
+  sliceIndex: number;
+  startWorld: MeasurementPoint;
+  startVoxel: MeasurementPoint | null;
+  endWorld: MeasurementPoint;
+  endVoxel: MeasurementPoint | null;
+};
+
+type CircleRoiDraft = {
+  viewportId: string;
+  plane: MeasurementPlane;
+  sliceIndex: number;
+  centerWorld: MeasurementPoint;
+  centerVoxel: MeasurementPoint | null;
+  edgeWorld: MeasurementPoint;
+  edgeVoxel: MeasurementPoint | null;
+  radiusMm: number;
+};
+
+type MeasurementPointerData = {
+  plane: MeasurementPlane;
+  pointCanvas: CanvasPoint;
+  sliceIndex: number;
+  voxel: VoxelPoint;
+  voxelPoint: MeasurementPoint;
+  world: MeasurementPoint;
 };
 
 type CornerstoneVolumeViewerProps = {
@@ -168,13 +197,16 @@ type CornerstoneVolumeViewerProps = {
   isMaskVisible?: boolean;
   maskLabels?: MaskLabelState[];
   maskOpacity?: number;
+  measurements?: MedicalMeasurement[];
   showControls?: boolean;
   segmentationUrl?: string | null;
+  selectedMeasurementId?: string | null;
   viewerMode?: ViewerLayoutMode;
   windowPreset?: WindowPresetId;
+  onAddMeasurement?: (measurement: MedicalMeasurement) => void;
   onActiveToolChange?: (tool: ViewerTool) => void;
-  onHuMeasurementChange?: (state: HuMeasurementPanelState) => void;
   onMaskOverlayStatusChange?: (status: MaskOverlayStatus) => void;
+  onSelectMeasurement?: (measurementId: string | null) => void;
   onViewerModeChange?: (mode: ViewerLayoutMode) => void;
   onWindowPresetChange?: (preset: WindowPresetId) => void;
   studyId?: string;
@@ -192,9 +224,12 @@ type VolumeRenderingAreaProps = {
   layout: VolumeLayout;
   maskLabels: MaskLabelState[];
   maskOpacity: number;
+  measurements: MedicalMeasurement[];
+  selectedMeasurementId: string | null;
+  onAddMeasurement?: (measurement: MedicalMeasurement) => void;
   onActiveToolChange?: (tool: ViewerTool) => void;
-  onHuMeasurementChange?: (state: HuMeasurementPanelState) => void;
   onMaskOverlayStatusChange?: (status: MaskOverlayStatus) => void;
+  onSelectMeasurement?: (measurementId: string | null) => void;
   onPresetChange: (preset: WindowPresetId) => void;
   onViewportDoubleClick?: (viewportKey: MprViewportKey) => void;
   renderingEngineId: string;
@@ -239,7 +274,6 @@ const primaryToolNames = [
 const undoableToolNames = new Set<string>([LengthTool.toolName, ProbeTool.toolName]);
 
 const toolNameByViewerTool: Partial<Record<ViewerTool, string>> = {
-  length: LengthTool.toolName,
   pan: PanTool.toolName,
   window: WindowLevelTool.toolName,
   zoom: ZoomTool.toolName,
@@ -442,7 +476,7 @@ function getClinicalHuValue(
   return value;
 }
 
-function readVoxelHu(
+function readVoxelClinicalValue(
   voxel: VoxelPoint,
   source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
   volumeId: string,
@@ -465,10 +499,20 @@ function readVoxelHu(
       return null;
     }
 
-    return Math.round(getClinicalHuValue(value, source));
+    return getClinicalHuValue(value, source);
   } catch {
     return null;
   }
+}
+
+function readVoxelHu(
+  voxel: VoxelPoint,
+  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+  volumeId: string,
+) {
+  const value = readVoxelClinicalValue(voxel, source, volumeId);
+
+  return value == null ? null : Math.round(value);
 }
 
 function getSliceLabel(sliceIndex: number, total: number) {
@@ -734,78 +778,6 @@ function getCanvasPointerPosition(
   };
 }
 
-function getCanvasDistance(start: CanvasPoint, end: CanvasPoint) {
-  const dx = end.x - start.x;
-  const dy = end.y - start.y;
-
-  return Math.sqrt(dx * dx + dy * dy);
-}
-
-function getHuCircleRadius(draft: HuCircleDraft) {
-  return getCanvasDistance(draft.centerCanvas, draft.edgeCanvas || draft.centerCanvas);
-}
-
-function getHuAnnotationPosition(
-  draft: HuCircleDraft,
-  viewportElement: HTMLElement | null | undefined,
-) {
-  const radius = getHuCircleRadius(draft);
-  const viewportWidth = viewportElement?.clientWidth || 0;
-  const viewportHeight = viewportElement?.clientHeight || 0;
-  const labelWidth = 168;
-  const labelHeight = 86;
-  const gap = 12;
-  let left = draft.centerCanvas.x + radius + gap;
-  let top = draft.centerCanvas.y - labelHeight / 2;
-
-  if (viewportWidth && left + labelWidth > viewportWidth - gap) {
-    left = draft.centerCanvas.x - radius - labelWidth - gap;
-  }
-
-  if (viewportWidth) {
-    left = Math.max(gap, Math.min(left, viewportWidth - labelWidth - gap));
-  }
-
-  if (viewportHeight) {
-    top = Math.max(gap, Math.min(top, viewportHeight - labelHeight - gap));
-  } else {
-    top = Math.max(gap, top);
-  }
-
-  return { left, top };
-}
-
-function getHuAnnotationLines(
-  draft: HuCircleDraft,
-  result: HuCircleMeasurement | null,
-  isLoading: boolean,
-) {
-  if (!draft.edgeCanvas) {
-    return ["Centre HU", "Déplacez pour définir le rayon"];
-  }
-
-  if (!draft.isFinalized) {
-    return [
-      `Rayon ${Math.round(getHuCircleRadius(draft))} px`,
-      "Cliquez pour valider",
-    ];
-  }
-
-  if (isLoading) {
-    return ["Calcul HU..."];
-  }
-
-  if (!result) {
-    return ["Calcul HU en attente"];
-  }
-
-  return [
-    `Mean ${Math.round(result.hu.mean)} HU`,
-    `Median ${Math.round(result.hu.median)} HU`,
-    `Min/Max ${Math.round(result.hu.min)}/${Math.round(result.hu.max)}`,
-  ];
-}
-
 function getPlaneByViewportId(
   viewportId: string,
   configs: ViewportConfig[],
@@ -832,23 +804,57 @@ function getWorldPoint(
   }
 }
 
-function getMeasurementErrorMessage(error: unknown) {
-  const record = error && typeof error === "object" ? (error as Record<string, unknown>) : null;
-  const response = record?.response;
-  const responseRecord = response && typeof response === "object" ? (response as Record<string, unknown>) : null;
-  const data = responseRecord?.data;
-  const dataRecord = data && typeof data === "object" ? (data as Record<string, unknown>) : null;
-  const detail = dataRecord?.detail;
+function createMeasurementId(type: MedicalMeasurement["type"]) {
+  const randomId =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-  if (typeof detail === "string") {
-    return detail;
+  return `${type}-${randomId}`;
+}
+
+function getMeasurementColor(type: MedicalMeasurement["type"]) {
+  if (type === "length") {
+    return "rgb(56, 189, 248)";
   }
 
-  if (error instanceof Error) {
-    return error.message;
+  if (type === "hu_probe") {
+    return "rgb(52, 211, 153)";
   }
 
-  return "Calcul HU indisponible.";
+  return "rgb(250, 204, 21)";
+}
+
+function isCustomMeasurementTool(tool: ViewerTool) {
+  return tool === "length" || tool === "hu" || tool === "circle_roi";
+}
+
+function getMeasurementDraftOverlay(
+  lengthDraft: LengthDraft | null,
+  circleRoiDraft: CircleRoiDraft | null,
+): MeasurementDraft | null {
+  if (lengthDraft) {
+    return {
+      endWorld: lengthDraft.endWorld,
+      sliceIndex: lengthDraft.sliceIndex,
+      startWorld: lengthDraft.startWorld,
+      type: "length",
+      viewportPlane: lengthDraft.plane,
+    };
+  }
+
+  if (circleRoiDraft) {
+    return {
+      centerWorld: circleRoiDraft.centerWorld,
+      edgeWorld: circleRoiDraft.edgeWorld,
+      radiusMm: circleRoiDraft.radiusMm,
+      sliceIndex: circleRoiDraft.sliceIndex,
+      type: "circle_roi",
+      viewportPlane: circleRoiDraft.plane,
+    };
+  }
+
+  return null;
 }
 
 function parseMaskLabelColor(color: string): [number, number, number] | null {
@@ -1216,15 +1222,18 @@ function VolumeRenderingArea({
   layout,
   maskLabels,
   maskOpacity,
+  measurements,
+  onAddMeasurement,
   onActiveToolChange,
-  onHuMeasurementChange,
   onMaskOverlayStatusChange,
+  onSelectMeasurement,
   onPresetChange,
   onViewportDoubleClick,
   renderingEngineId,
   segmentationId,
   segmentationUrl,
   segmentationVolumeId,
+  selectedMeasurementId,
   source,
   studyId,
   toolGroupId,
@@ -1245,14 +1254,14 @@ function VolumeRenderingArea({
   const activePresetRef = useRef(activePreset);
   const activeToolRef = useRef(activeTool);
   const lastModeToolRef = useRef<ViewerTool>("crosshair");
-  const huCircleDraftRef = useRef<HuCircleDraft | null>(null);
+  const lengthDraftRef = useRef<LengthDraft | null>(null);
+  const circleRoiDraftRef = useRef<CircleRoiDraft | null>(null);
   const handledActionRequestIdRef = useRef<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeViewportId, setActiveViewportId] = useState<string | null>(null);
   const [mprState, setMprState] = useState(() => createInitialMprState(source));
-  const [huCircleDraft, setHuCircleDraft] = useState<HuCircleDraft | null>(null);
-  const [huResult, setHuResult] = useState<HuCircleMeasurement | null>(null);
-  const [isHuLoading, setIsHuLoading] = useState(false);
+  const [lengthDraft, setLengthDraft] = useState<LengthDraft | null>(null);
+  const [circleRoiDraft, setCircleRoiDraft] = useState<CircleRoiDraft | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isSceneReady, setIsSceneReady] = useState(false);
   const [maskOverlayStatus, setMaskOverlayStatus] = useState<MaskOverlayStatus>("idle");
@@ -1279,13 +1288,12 @@ function VolumeRenderingArea({
     [mprState.crosshairVoxel, source],
   );
 
-  const clearHuMeasurement = useCallback(() => {
-    huCircleDraftRef.current = null;
-    setHuCircleDraft(null);
-    setHuResult(null);
-    setIsHuLoading(false);
-    onHuMeasurementChange?.({ status: "idle" });
-  }, [onHuMeasurementChange]);
+  const clearMeasurementDrafts = useCallback(() => {
+    lengthDraftRef.current = null;
+    circleRoiDraftRef.current = null;
+    setLengthDraft(null);
+    setCircleRoiDraft(null);
+  }, []);
 
   const updateMaskOverlayStatus = useCallback(
     (status: MaskOverlayStatus) => {
@@ -1363,10 +1371,10 @@ function VolumeRenderingArea({
         sliceIndexByPlane: nextSliceIndexByPlane,
       }));
       syncMprViewportsToCrosshair(nextSliceIndexByPlane);
-      clearHuMeasurement();
+      clearMeasurementDrafts();
       setToolMessage(null);
     },
-    [clearHuMeasurement, source, syncMprViewportsToCrosshair],
+    [clearMeasurementDrafts, source, syncMprViewportsToCrosshair],
   );
 
   const getViewportClickVoxel = useCallback(
@@ -1472,6 +1480,48 @@ function VolumeRenderingArea({
     [getViewportProbe],
   );
 
+  const getMeasurementPointerData = useCallback(
+    (
+      event: PointerEvent<HTMLElement>,
+      viewportId: string,
+    ): MeasurementPointerData | null => {
+      const point = getCanvasPointerPosition(event, viewportElementsRef.current[viewportId]);
+      const plane = getPlaneByViewportId(viewportId, viewportConfigs);
+      const viewport =
+        viewportsByIdRef.current[viewportId] || renderingEngineRef.current?.getViewport(viewportId);
+
+      if (!point || !plane) {
+        return null;
+      }
+
+      const world = getWorldPoint(viewport, point);
+
+      if (!world) {
+        setToolMessage("Coordonnées monde indisponibles pour cette mesure.");
+        return null;
+      }
+
+      const voxel = worldToVoxel(world, source);
+
+      if (!voxel) {
+        setToolMessage("Coordonnées voxel indisponibles pour cette mesure.");
+        return null;
+      }
+
+      const clampedVoxel = clampVoxelPoint(voxel, source);
+
+      return {
+        plane,
+        pointCanvas: point,
+        sliceIndex: getSliceIndexForVoxel(clampedVoxel, plane),
+        voxel: clampedVoxel,
+        voxelPoint: voxelToMeasurementPoint(clampedVoxel),
+        world: toMeasurementPoint(world),
+      };
+    },
+    [source, viewportConfigs],
+  );
+
   const setSliceForViewport = useCallback(
     (viewportId: string, nextSliceIndex: number) => {
       const viewportKey = getPlaneByViewportId(viewportId, viewportConfigs);
@@ -1553,12 +1603,340 @@ function VolumeRenderingArea({
     [applyMprVoxel, getViewportClickVoxel, isLoading, isSceneReady, setActiveViewport],
   );
 
+  const finalizeLengthMeasurement = useCallback(
+    (draft: LengthDraft, pointerData: MeasurementPointerData) => {
+      if (!studyId) {
+        setToolMessage("Etude indisponible pour la mesure.");
+        return;
+      }
+
+      const pointsWorld: [MeasurementPoint, MeasurementPoint] = [
+        draft.startWorld,
+        pointerData.world,
+      ];
+      const pointsVoxel =
+        draft.startVoxel && pointerData.voxelPoint
+          ? ([draft.startVoxel, pointerData.voxelPoint] as [
+              MeasurementPoint,
+              MeasurementPoint,
+            ])
+          : undefined;
+      const lengthMm = getLengthMm({
+        pointsVoxel,
+        pointsWorld,
+        spacing: source.metadata?.spacing,
+      });
+
+      if (!Number.isFinite(lengthMm) || lengthMm < 0.1) {
+        setToolMessage("Distance trop courte.");
+        return;
+      }
+
+      onAddMeasurement?.({
+        color: getMeasurementColor("length"),
+        createdAt: new Date().toISOString(),
+        id: createMeasurementId("length"),
+        lengthMm,
+        pointsVoxel,
+        pointsWorld,
+        sliceIndex: draft.sliceIndex,
+        studyId,
+        type: "length",
+        viewportPlane: draft.plane,
+      });
+      clearMeasurementDrafts();
+      setToolMessage(`Distance ${lengthMm.toFixed(1)} mm`);
+    },
+    [clearMeasurementDrafts, onAddMeasurement, source.metadata?.spacing, studyId],
+  );
+
+  const updateCircleRoiDraftFromPointer = useCallback(
+    (draft: CircleRoiDraft, pointerData: MeasurementPointerData): CircleRoiDraft => {
+      const pointsVoxel =
+        draft.centerVoxel && pointerData.voxelPoint
+          ? ([draft.centerVoxel, pointerData.voxelPoint] as [
+              MeasurementPoint,
+              MeasurementPoint,
+            ])
+          : undefined;
+      const worldRadiusMm = getLengthMm({
+        pointsVoxel,
+        pointsWorld: [draft.centerWorld, pointerData.world],
+        spacing: source.metadata?.spacing,
+      });
+      const radiusMm = getPlaneRadiusMm({
+        centerVoxel: draft.centerVoxel || undefined,
+        edgeVoxel: pointerData.voxelPoint,
+        plane: draft.plane,
+        spacing: source.metadata?.spacing,
+        worldRadiusMm,
+      });
+
+      return {
+        ...draft,
+        edgeVoxel: pointerData.voxelPoint,
+        edgeWorld: pointerData.world,
+        radiusMm,
+      };
+    },
+    [source.metadata?.spacing],
+  );
+
+  const finalizeCircleRoiMeasurement = useCallback(
+    (draft: CircleRoiDraft) => {
+      if (!studyId) {
+        setToolMessage("Etude indisponible pour la mesure.");
+        return;
+      }
+
+      if (!draft.centerVoxel || draft.radiusMm < 0.5) {
+        setToolMessage("Définissez un rayon avant de valider la ROI.");
+        return;
+      }
+
+      const shape = getVolumeShape(source);
+      const stats = calculateCircleRoiStats({
+        centerVoxel: draft.centerVoxel,
+        plane: draft.plane,
+        radiusMm: draft.radiusMm,
+        readHu: (voxel) =>
+          readVoxelClinicalValue(clampVoxelPoint(voxel, source), source, volumeId),
+        shape,
+        spacing: source.metadata?.spacing,
+      });
+      const radiusVoxel = draft.edgeVoxel
+        ? Math.sqrt(
+            (draft.centerVoxel[0] - draft.edgeVoxel[0]) ** 2 +
+              (draft.centerVoxel[1] - draft.edgeVoxel[1]) ** 2 +
+              (draft.centerVoxel[2] - draft.edgeVoxel[2]) ** 2,
+          )
+        : undefined;
+
+      onAddMeasurement?.({
+        centerVoxel: draft.centerVoxel,
+        centerWorld: draft.centerWorld,
+        color: getMeasurementColor("circle_roi"),
+        createdAt: new Date().toISOString(),
+        edgeVoxel: draft.edgeVoxel || undefined,
+        edgeWorld: draft.edgeWorld,
+        id: createMeasurementId("circle_roi"),
+        maxHu: stats.maxHu,
+        meanHu: stats.meanHu,
+        minHu: stats.minHu,
+        radiusMm: draft.radiusMm,
+        radiusVoxel,
+        sliceIndex: draft.sliceIndex,
+        stdHu: stats.stdHu,
+        studyId,
+        type: "circle_roi",
+        viewportPlane: draft.plane,
+        voxelCount: stats.voxelCount,
+      });
+      clearMeasurementDrafts();
+      setToolMessage(
+        stats.meanHu == null
+          ? "ROI créée, HU indisponible."
+          : `ROI mean ${Math.round(stats.meanHu)} HU`,
+      );
+    },
+    [clearMeasurementDrafts, onAddMeasurement, source, studyId, volumeId],
+  );
+
+  const handleMeasurementPointerDown = useCallback(
+    (event: PointerEvent<HTMLDivElement>, viewportId: string) => {
+      const tool = activeToolRef.current;
+
+      if (!isCustomMeasurementTool(tool) || isLoading || !isSceneReady) {
+        return false;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      setActiveViewport(viewportId);
+      const pointerData = getMeasurementPointerData(event, viewportId);
+
+      if (!pointerData) {
+        return true;
+      }
+
+      setToolMessage(null);
+
+      if (tool === "hu") {
+        if (!studyId) {
+          setToolMessage("Etude indisponible pour la mesure.");
+          return true;
+        }
+
+        clearMeasurementDrafts();
+        onAddMeasurement?.({
+          color: getMeasurementColor("hu_probe"),
+          createdAt: new Date().toISOString(),
+          hu: readVoxelHu(pointerData.voxel, source, volumeId),
+          id: createMeasurementId("hu_probe"),
+          pointVoxel: pointerData.voxelPoint,
+          pointWorld: pointerData.world,
+          sliceIndex: pointerData.sliceIndex,
+          studyId,
+          type: "hu_probe",
+          viewportPlane: pointerData.plane,
+        });
+        return true;
+      }
+
+      if (tool === "length") {
+        const currentDraft = lengthDraftRef.current;
+
+        if (currentDraft?.viewportId === viewportId) {
+          finalizeLengthMeasurement(currentDraft, pointerData);
+          return true;
+        }
+
+        const nextDraft: LengthDraft = {
+          endVoxel: pointerData.voxelPoint,
+          endWorld: pointerData.world,
+          plane: pointerData.plane,
+          sliceIndex: pointerData.sliceIndex,
+          startVoxel: pointerData.voxelPoint,
+          startWorld: pointerData.world,
+          viewportId,
+        };
+
+        lengthDraftRef.current = nextDraft;
+        circleRoiDraftRef.current = null;
+        setLengthDraft(nextDraft);
+        setCircleRoiDraft(null);
+        return true;
+      }
+
+      const currentDraft = circleRoiDraftRef.current;
+
+      if (currentDraft?.viewportId === viewportId && currentDraft.radiusMm >= 0.5) {
+        finalizeCircleRoiMeasurement(updateCircleRoiDraftFromPointer(currentDraft, pointerData));
+        return true;
+      }
+
+      const nextDraft: CircleRoiDraft = {
+        centerVoxel: pointerData.voxelPoint,
+        centerWorld: pointerData.world,
+        edgeVoxel: pointerData.voxelPoint,
+        edgeWorld: pointerData.world,
+        plane: pointerData.plane,
+        radiusMm: 0,
+        sliceIndex: pointerData.sliceIndex,
+        viewportId,
+      };
+
+      circleRoiDraftRef.current = nextDraft;
+      lengthDraftRef.current = null;
+      setCircleRoiDraft(nextDraft);
+      setLengthDraft(null);
+      return true;
+    },
+    [
+      clearMeasurementDrafts,
+      finalizeCircleRoiMeasurement,
+      finalizeLengthMeasurement,
+      getMeasurementPointerData,
+      isLoading,
+      isSceneReady,
+      onAddMeasurement,
+      setActiveViewport,
+      source,
+      studyId,
+      updateCircleRoiDraftFromPointer,
+      volumeId,
+    ],
+  );
+
+  const handleMeasurementPointerMove = useCallback(
+    (event: PointerEvent<HTMLDivElement>, viewportId: string) => {
+      const tool = activeToolRef.current;
+
+      if (!isCustomMeasurementTool(tool) || isLoading || !isSceneReady) {
+        return false;
+      }
+
+      if (tool === "hu") {
+        return true;
+      }
+
+      const pointerData = getMeasurementPointerData(event, viewportId);
+
+      if (!pointerData) {
+        return true;
+      }
+
+      if (tool === "length") {
+        const currentDraft = lengthDraftRef.current;
+
+        if (!currentDraft || currentDraft.viewportId !== viewportId) {
+          return true;
+        }
+
+        const nextDraft = {
+          ...currentDraft,
+          endVoxel: pointerData.voxelPoint,
+          endWorld: pointerData.world,
+        };
+
+        lengthDraftRef.current = nextDraft;
+        setLengthDraft(nextDraft);
+        return true;
+      }
+
+      const currentDraft = circleRoiDraftRef.current;
+
+      if (!currentDraft || currentDraft.viewportId !== viewportId) {
+        return true;
+      }
+
+      const nextDraft = updateCircleRoiDraftFromPointer(currentDraft, pointerData);
+
+      circleRoiDraftRef.current = nextDraft;
+      setCircleRoiDraft(nextDraft);
+      return true;
+    },
+    [
+      getMeasurementPointerData,
+      isLoading,
+      isSceneReady,
+      updateCircleRoiDraftFromPointer,
+    ],
+  );
+
+  const handleMeasurementPointerUp = useCallback(
+    (event: PointerEvent<HTMLDivElement>, viewportId: string) => {
+      if (activeToolRef.current !== "circle_roi") {
+        return false;
+      }
+
+      const currentDraft = circleRoiDraftRef.current;
+
+      if (!currentDraft || currentDraft.viewportId !== viewportId || currentDraft.radiusMm < 0.5) {
+        return true;
+      }
+
+      const pointerData = getMeasurementPointerData(event, viewportId);
+      const nextDraft = pointerData
+        ? updateCircleRoiDraftFromPointer(currentDraft, pointerData)
+        : currentDraft;
+
+      finalizeCircleRoiMeasurement(nextDraft);
+      return true;
+    },
+    [
+      finalizeCircleRoiMeasurement,
+      getMeasurementPointerData,
+      updateCircleRoiDraftFromPointer,
+    ],
+  );
+
   const handleViewportPointerDown = useCallback(
     (event: PointerEvent<HTMLDivElement>, viewportId: string) => {
       setActiveViewport(viewportId);
       updateViewportProbe(event, viewportId);
 
-      if (activeToolRef.current === "hu") {
+      if (handleMeasurementPointerDown(event, viewportId)) {
         return;
       }
 
@@ -1568,14 +1946,23 @@ function VolumeRenderingArea({
       }));
       updateCrosshairPositionFromEvent(event, viewportId);
     },
-    [setActiveViewport, updateCrosshairPositionFromEvent, updateViewportProbe],
+    [
+      handleMeasurementPointerDown,
+      setActiveViewport,
+      updateCrosshairPositionFromEvent,
+      updateViewportProbe,
+    ],
   );
 
   const handleViewportPointerMove = useCallback(
     (event: PointerEvent<HTMLDivElement>, viewportId: string) => {
       updateViewportProbe(event, viewportId);
 
-      if (activeToolRef.current === "hu" || event.buttons !== 1) {
+      if (handleMeasurementPointerMove(event, viewportId)) {
+        return;
+      }
+
+      if (event.buttons !== 1) {
         return;
       }
 
@@ -1585,15 +1972,19 @@ function VolumeRenderingArea({
       }));
       updateCrosshairPositionFromEvent(event, viewportId);
     },
-    [updateCrosshairPositionFromEvent, updateViewportProbe],
+    [handleMeasurementPointerMove, updateCrosshairPositionFromEvent, updateViewportProbe],
   );
 
-  const handleViewportPointerUp = useCallback(() => {
-    setMprState((currentState) => ({
-      ...currentState,
-      isDraggingCrosshair: false,
-    }));
-  }, []);
+  const handleViewportPointerUp = useCallback(
+    (event: PointerEvent<HTMLDivElement>, viewportId: string) => {
+      handleMeasurementPointerUp(event, viewportId);
+      setMprState((currentState) => ({
+        ...currentState,
+        isDraggingCrosshair: false,
+      }));
+    },
+    [handleMeasurementPointerUp],
+  );
 
   const handleViewportPointerLeave = useCallback(
     (viewportId: string) => {
@@ -1605,132 +1996,6 @@ function VolumeRenderingArea({
         ...currentState,
         [viewportId]: null,
       }));
-    },
-    [],
-  );
-
-  const finalizeHuCircle = useCallback(
-    async (draft: HuCircleDraft) => {
-      if (!studyId || !draft.edgeWorld) {
-        const message = !studyId
-          ? "Etude indisponible pour la mesure HU."
-          : "Définissez un rayon avant de valider la mesure HU.";
-
-        setToolMessage(message);
-        onHuMeasurementChange?.({ message, status: "error" });
-        return;
-      }
-
-      setIsHuLoading(true);
-      setToolMessage(null);
-      onHuMeasurementChange?.({ status: "loading" });
-
-      try {
-        const response = await Measurements.createHuCircleMeasurement(studyId, {
-          center_world: draft.centerWorld,
-          edge_world: draft.edgeWorld,
-          plane: draft.plane,
-        });
-
-        setHuResult(response.data);
-        onHuMeasurementChange?.({ result: response.data, status: "success" });
-      } catch (measurementError) {
-        const message = getMeasurementErrorMessage(measurementError);
-
-        setToolMessage(message);
-        onHuMeasurementChange?.({ message, status: "error" });
-      } finally {
-        setIsHuLoading(false);
-      }
-    },
-    [onHuMeasurementChange, studyId],
-  );
-
-  const handleHuPointerDown = useCallback(
-    (event: PointerEvent<HTMLDivElement>, viewportId: string) => {
-      const point = getCanvasPointerPosition(event, viewportElementsRef.current[viewportId]);
-      const plane = getPlaneByViewportId(viewportId, viewportConfigs);
-      const viewport =
-        viewportsByIdRef.current[viewportId] || renderingEngineRef.current?.getViewport(viewportId);
-
-      if (!point || !plane) {
-        return;
-      }
-
-      const worldPoint = getWorldPoint(viewport, point);
-
-      if (!worldPoint) {
-        setToolMessage("Coordonnées monde indisponibles pour la mesure HU.");
-        onHuMeasurementChange?.({
-          message: "Coordonnées monde indisponibles pour la mesure HU.",
-          status: "error",
-        });
-        return;
-      }
-
-      event.preventDefault();
-      event.stopPropagation();
-      setActiveViewport(viewportId);
-      setToolMessage(null);
-      const currentDraft = huCircleDraftRef.current;
-
-      if (currentDraft && !currentDraft.isFinalized && currentDraft.viewportId === viewportId) {
-        const nextDraft = {
-          ...currentDraft,
-          edgeCanvas: point,
-          edgeWorld: worldPoint,
-          isFinalized: true,
-        };
-
-        huCircleDraftRef.current = nextDraft;
-        setHuCircleDraft(nextDraft);
-        void finalizeHuCircle(nextDraft);
-        return;
-      }
-
-      const nextDraft = {
-        centerCanvas: point,
-        centerWorld: worldPoint,
-        edgeCanvas: null,
-        edgeWorld: null,
-        isFinalized: false,
-        plane,
-        viewportId,
-      };
-
-      huCircleDraftRef.current = nextDraft;
-      setHuCircleDraft(nextDraft);
-      setHuResult(null);
-      onHuMeasurementChange?.({ status: "draft" });
-    },
-    [finalizeHuCircle, onHuMeasurementChange, setActiveViewport, viewportConfigs],
-  );
-
-  const handleHuPointerMove = useCallback(
-    (event: PointerEvent<HTMLDivElement>, viewportId: string) => {
-      const point = getCanvasPointerPosition(event, viewportElementsRef.current[viewportId]);
-      const viewport =
-        viewportsByIdRef.current[viewportId] || renderingEngineRef.current?.getViewport(viewportId);
-      const currentDraft = huCircleDraftRef.current;
-
-      if (
-        !point ||
-        !currentDraft ||
-        currentDraft.isFinalized ||
-        currentDraft.viewportId !== viewportId
-      ) {
-        return;
-      }
-
-      const worldPoint = getWorldPoint(viewport, point);
-      const nextDraft = {
-        ...currentDraft,
-        edgeCanvas: point,
-        edgeWorld: worldPoint || currentDraft.edgeWorld,
-      };
-
-      huCircleDraftRef.current = nextDraft;
-      setHuCircleDraft(nextDraft);
     },
     [],
   );
@@ -1758,12 +2023,12 @@ function VolumeRenderingArea({
 
     setMprState(initialMprState);
     syncMprViewportsToCrosshair(initialMprState.sliceIndexByPlane);
-    clearHuMeasurement();
+    clearMeasurementDrafts();
     setToolMessage(null);
     onPresetChange(preset.id);
     onActiveToolChange?.("crosshair");
   }, [
-    clearHuMeasurement,
+    clearMeasurementDrafts,
     onActiveToolChange,
     onPresetChange,
     source,
@@ -1830,27 +2095,21 @@ function VolumeRenderingArea({
 
     setMprState(initialMprState);
     setProbeByViewportId({});
+    clearMeasurementDrafts();
     syncMprViewportsToCrosshair(initialMprState.sliceIndexByPlane);
-  }, [source]);
+  }, [clearMeasurementDrafts, source, syncMprViewportsToCrosshair]);
 
   useEffect(() => {
     activeToolRef.current = activeTool;
+    clearMeasurementDrafts();
 
     if (activeTool !== "none") {
       lastModeToolRef.current = activeTool;
     }
-
-    if (activeTool === "hu" && !huResult) {
-      onHuMeasurementChange?.({ status: huCircleDraft ? "draft" : "idle" });
-    }
-
-    if (activeTool !== "hu") {
-      clearHuMeasurement();
-    }
-  }, [activeTool, clearHuMeasurement, huCircleDraft, huResult, onHuMeasurementChange]);
+  }, [activeTool, clearMeasurementDrafts]);
 
   useEffect(() => {
-    clearHuMeasurement();
+    clearMeasurementDrafts();
     setToolMessage(null);
 
     const frameId = requestAnimationFrame(() => {
@@ -1869,7 +2128,7 @@ function VolumeRenderingArea({
     });
 
     return () => cancelAnimationFrame(frameId);
-  }, [clearHuMeasurement, clearTemporaryKey, viewportIds]);
+  }, [clearMeasurementDrafts, clearTemporaryKey, viewportIds]);
 
   useEffect(() => {
     isMaskVisibleRef.current = isMaskVisible;
@@ -2468,6 +2727,7 @@ function VolumeRenderingArea({
   }, []);
   const spacingLabel = formatSpacing(source);
   const presetOverlayLabel = getPresetOverlayLabel(activePreset);
+  const measurementDraftOverlay = getMeasurementDraftOverlay(lengthDraft, circleRoiDraft);
   const activeViewportConfig =
     viewportConfigs.find((config) => config.id === activeViewportId) ||
     viewportConfigs.find((config) => config.id === activeViewportIdRef.current) ||
@@ -2489,6 +2749,28 @@ function VolumeRenderingArea({
             ? `Seg ${maskOverlayStatus}`
             : undefined;
         const sliceLabel = getSliceLabel(sliceIndex, sliceTotal);
+        const projectWorldToCanvas = (point: MeasurementPoint) => {
+          const viewport = viewportsByIdRef.current[config.id] as CanvasWorldViewport | undefined;
+
+          if (!viewport?.worldToCanvas) {
+            return null;
+          }
+
+          try {
+            const canvasPoint = viewport.worldToCanvas([
+              point[0],
+              point[1],
+              point[2],
+            ] as Types.Point3);
+
+            return {
+              x: Number(canvasPoint[0]),
+              y: Number(canvasPoint[1]),
+            };
+          } catch {
+            return null;
+          }
+        };
 
         return (
           <ViewportFrame
@@ -2501,7 +2783,7 @@ function VolumeRenderingArea({
             onPointerDown={(event) => handleViewportPointerDown(event, config.id)}
             onPointerLeave={() => handleViewportPointerLeave(config.id)}
             onPointerMove={(event) => handleViewportPointerMove(event, config.id)}
-            onPointerUp={handleViewportPointerUp}
+            onPointerUp={(event) => handleViewportPointerUp(event, config.id)}
             showDefaultOverlay={false}
           >
           <div
@@ -2534,58 +2816,23 @@ function VolumeRenderingArea({
               position={crosshairPosition}
             />
           ) : null}
-          {activeTool === "hu" ? (
-            <div
-              className="absolute inset-0 z-30 cursor-crosshair"
-              onPointerDown={(event) => handleHuPointerDown(event, config.id)}
-              onPointerMove={(event) => handleHuPointerMove(event, config.id)}
+          {!shouldShowLoading ? (
+            <MeasurementOverlay
+              canSelect={!isCustomMeasurementTool(activeTool)}
+              draft={
+                measurementDraftOverlay?.viewportPlane === config.key &&
+                measurementDraftOverlay.sliceIndex === sliceIndex
+                  ? measurementDraftOverlay
+                  : null
+              }
+              measurements={measurements}
+              onSelectMeasurement={(measurementId) => onSelectMeasurement?.(measurementId)}
+              plane={config.key}
+              projectWorldToCanvas={projectWorldToCanvas}
+              selectedMeasurementId={selectedMeasurementId}
+              sliceIndex={sliceIndex}
             />
           ) : null}
-          {huCircleDraft?.viewportId === config.id
-            ? (() => {
-                const radius = Math.max(2, getHuCircleRadius(huCircleDraft));
-                const annotationPosition = getHuAnnotationPosition(
-                  huCircleDraft,
-                  viewportElementsRef.current[config.id],
-                );
-                const annotationLines = getHuAnnotationLines(huCircleDraft, huResult, isHuLoading);
-
-                return (
-                  <div className="pointer-events-none absolute inset-0 z-40 overflow-hidden">
-                    <svg className="absolute inset-0 h-full w-full">
-                      <circle
-                        cx={huCircleDraft.centerCanvas.x}
-                        cy={huCircleDraft.centerCanvas.y}
-                        fill="rgba(250, 204, 21, 0.12)"
-                        r={radius}
-                        stroke="rgb(250, 204, 21)"
-                        strokeWidth="2"
-                      />
-                      <circle
-                        cx={huCircleDraft.centerCanvas.x}
-                        cy={huCircleDraft.centerCanvas.y}
-                        fill="rgb(250, 204, 21)"
-                        r="3"
-                      />
-                    </svg>
-                    <div
-                      className="absolute rounded border bg-black/75 px-2 py-1 text-[11px] font-medium leading-relaxed shadow-lg"
-                      style={{
-                        borderColor: "rgba(250, 204, 21, 0.8)",
-                        color: "rgb(254, 240, 138)",
-                        left: `${annotationPosition.left}px`,
-                        top: `${annotationPosition.top}px`,
-                        width: "168px",
-                      }}
-                    >
-                      {annotationLines.map((line) => (
-                        <p key={line}>{line}</p>
-                      ))}
-                    </div>
-                  </div>
-                );
-              })()
-            : null}
           </ViewportFrame>
         );
       })}
@@ -2648,12 +2895,15 @@ export function CornerstoneVolumeViewer({
   isMaskVisible = true,
   maskLabels = [],
   maskOpacity = 0.6,
+  measurements = [],
+  onAddMeasurement,
   onActiveToolChange,
-  onHuMeasurementChange,
   onMaskOverlayStatusChange,
+  onSelectMeasurement,
   onViewerModeChange,
   onWindowPresetChange,
   segmentationUrl,
+  selectedMeasurementId = null,
   showControls = true,
   source,
   studyId,
@@ -2683,7 +2933,6 @@ export function CornerstoneVolumeViewer({
     const previousMode = activeViewerMode;
 
     setClearTemporaryKey((value) => value + 1);
-    onHuMeasurementChange?.({ status: "idle" });
     setInternalViewerMode(nextMode);
     onViewerModeChange?.(nextMode);
 
@@ -2754,9 +3003,11 @@ export function CornerstoneVolumeViewer({
             layout={activeLayout}
             maskLabels={maskLabels}
             maskOpacity={maskOpacity}
+            measurements={measurements}
+            onAddMeasurement={onAddMeasurement}
             onActiveToolChange={onActiveToolChange}
-            onHuMeasurementChange={onHuMeasurementChange}
             onMaskOverlayStatusChange={onMaskOverlayStatusChange}
+            onSelectMeasurement={onSelectMeasurement}
             onPresetChange={handleWindowPresetChange}
             onViewportDoubleClick={(viewportKey) => {
               handleViewerModeChange(activeViewerMode === viewportKey ? "mpr" : viewportKey);
@@ -2765,6 +3016,7 @@ export function CornerstoneVolumeViewer({
             segmentationId={segmentationId}
             segmentationUrl={segmentationUrl}
             segmentationVolumeId={segmentationVolumeId}
+            selectedMeasurementId={selectedMeasurementId}
             source={source}
             studyId={studyId}
             toolGroupId={toolGroupId}
