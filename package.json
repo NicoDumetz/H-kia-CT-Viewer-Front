@@ -9,8 +9,15 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@cornerstonejs/core": "^4.22.12",
+    "@cornerstonejs/dicom-image-loader": "^4.22.12",
+    "@cornerstonejs/nifti-volume-loader": "^4.22.12",
+    "@cornerstonejs/tools": "^4.22.12",
+    "@kitware/vtk.js": "^34.15.1",
     "@mui/icons-material": "^7.3.2",
     "axios": "^1.13.6",
+    "dicom-parser": "^1.8.21",
+    "nifti-reader-js": "^0.6.9",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-router-dom": "^7.7.1"

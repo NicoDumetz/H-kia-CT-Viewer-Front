@@ -31,4 +31,21 @@ export class Segmentations {
       `/studies/${encodeURIComponent(studyId)}/segmentations/${encodeURIComponent(segmentationId)}`,
     );
   }
+
+  static uploadSegmentation(studyId: string, file: File, name?: string): ApiRequest<Segmentation> {
+    const formData = new FormData();
+
+    formData.append("file", file);
+
+    if (name) {
+      formData.append("name", name);
+    }
+
+    formData.append("source", "manual_upload");
+
+    return Api.post<Segmentation, FormData>(
+      `/studies/${encodeURIComponent(studyId)}/segmentations/upload`,
+      formData,
+    );
+  }
 }

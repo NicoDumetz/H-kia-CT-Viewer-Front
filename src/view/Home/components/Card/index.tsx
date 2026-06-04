@@ -11,48 +11,50 @@
 // Project     : H-kia-CT-Viewer-Front
 // Author      : Nicolas Dumetz
 //
-// Created     : Tuesday May 26 2026
+// Created     : Thursday June 04 2026
 //
 // =============================================================
 
 import type { ReactNode } from "react";
 
-import { cn } from "../../helpers/Cn";
+import { cn } from "../../../../helpers/Cn";
 
-type PanelProps = {
+type CardProps = {
   title?: string;
-  subtitle?: string;
-  actions?: ReactNode;
+  description?: string;
   children: ReactNode;
+  footer?: ReactNode;
   className?: string;
 };
 
-export function Panel({
-  actions,
+export function Card({
   children,
   className,
-  subtitle,
+  description,
+  footer,
   title,
-}: PanelProps) {
-  const hasHeader = Boolean(title || subtitle || actions);
+}: CardProps) {
+  const hasHeader = Boolean(title || description);
 
   return (
     <section
       className={cn(
-        "overflow-hidden rounded-xl border border-contrast-700 bg-dark-contrast",
+        "rounded-xl border border-contrast-600 bg-dark-shade p-4",
         className,
       )}
     >
       {hasHeader ? (
-        <header className="flex items-start justify-between gap-4 border-b border-contrast-700 px-4 py-3">
-          <div className="min-w-0 space-y-1">
-            {title ? <h2 className="truncate text-sm font-semibold text-white">{title}</h2> : null}
-            {subtitle ? <p className="text-sm text-contrast-400">{subtitle}</p> : null}
-          </div>
-          {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
+        <header className="mb-4 space-y-1">
+          {title ? <h3 className="text-sm font-semibold text-white">{title}</h3> : null}
+          {description ? (
+            <p className="text-sm text-contrast-400">{description}</p>
+          ) : null}
         </header>
       ) : null}
-      <div className="p-4">{children}</div>
+      <div>{children}</div>
+      {footer ? (
+        <footer className="mt-4 border-t border-contrast-700 pt-4">{footer}</footer>
+      ) : null}
     </section>
   );
 }

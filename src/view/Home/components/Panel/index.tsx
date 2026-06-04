@@ -11,50 +11,48 @@
 // Project     : H-kia-CT-Viewer-Front
 // Author      : Nicolas Dumetz
 //
-// Created     : Tuesday May 26 2026
+// Created     : Thursday June 04 2026
 //
 // =============================================================
 
 import type { ReactNode } from "react";
 
-import { cn } from "../../helpers/Cn";
+import { cn } from "../../../../helpers/Cn";
 
-type CardProps = {
+type PanelProps = {
   title?: string;
-  description?: string;
+  subtitle?: string;
+  actions?: ReactNode;
   children: ReactNode;
-  footer?: ReactNode;
   className?: string;
 };
 
-export function Card({
+export function Panel({
+  actions,
   children,
   className,
-  description,
-  footer,
+  subtitle,
   title,
-}: CardProps) {
-  const hasHeader = Boolean(title || description);
+}: PanelProps) {
+  const hasHeader = Boolean(title || subtitle || actions);
 
   return (
     <section
       className={cn(
-        "rounded-xl border border-contrast-600 bg-dark-shade p-4",
+        "overflow-hidden rounded-xl border border-contrast-700 bg-dark-contrast",
         className,
       )}
     >
       {hasHeader ? (
-        <header className="mb-4 space-y-1">
-          {title ? <h3 className="text-sm font-semibold text-white">{title}</h3> : null}
-          {description ? (
-            <p className="text-sm text-contrast-400">{description}</p>
-          ) : null}
+        <header className="flex items-start justify-between gap-4 border-b border-contrast-700 px-4 py-3">
+          <div className="min-w-0 space-y-1">
+            {title ? <h2 className="truncate text-sm font-semibold text-white">{title}</h2> : null}
+            {subtitle ? <p className="text-sm text-contrast-400">{subtitle}</p> : null}
+          </div>
+          {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
         </header>
       ) : null}
-      <div>{children}</div>
-      {footer ? (
-        <footer className="mt-4 border-t border-contrast-700 pt-4">{footer}</footer>
-      ) : null}
+      <div className="p-4">{children}</div>
     </section>
   );
 }

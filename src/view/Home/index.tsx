@@ -1,12 +1,9 @@
 import {
   Badge,
   Button,
-  Card,
-  EmptyState,
-  Panel,
-  StatusDot,
   Toolbar,
-} from "../../components";
+} from "~/components";
+import { Card, EmptyState, Panel, StatusDot } from "./components";
 
 export default function Home() {
   return (

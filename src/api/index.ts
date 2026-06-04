@@ -19,4 +19,5 @@ export { Studies } from "./Studies";
 export { Ai } from "./Ai";
 export { Segmentations } from "./Segmentations";
 export { Analyses } from "./Analyses";
+export { Measurements } from "./Measurements";
 export { Workspace } from "./Workspace";

@@ -45,7 +45,7 @@ export type SegmentationMetadata = {
 export type Segmentation = {
   id: string;
   study_id: string;
-  source_run_id: string;
+  source_run_id: string | null;
   module_id: string;
   module_name?: string;
   status: "ready" | string;

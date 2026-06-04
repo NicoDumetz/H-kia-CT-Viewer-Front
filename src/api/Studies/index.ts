@@ -26,6 +26,10 @@ import type {
   StudyVolumeResponse,
 } from "~/types/Studies";
 
+type FileWithRelativePath = File & {
+  webkitRelativePath?: string;
+};
+
 export class Studies {
   static endpoint = "/studies";
 
@@ -37,7 +41,10 @@ export class Studies {
     const formData = new FormData();
 
     files.forEach((file) => {
-      formData.append("files", file);
+      const fileWithRelativePath = file as FileWithRelativePath;
+      const filename = fileWithRelativePath.webkitRelativePath || file.name;
+
+      formData.append("files", file, filename);
     });
 
     return Api.post<StudyImportResponse, FormData>(`${Studies.endpoint}/import`, formData);

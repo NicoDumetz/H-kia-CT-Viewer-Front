@@ -11,13 +11,25 @@
 // Project     : H-kia-CT-Viewer-Front
 // Author      : Nicolas Dumetz
 //
-// Created     : Tuesday May 26 2026
+// Created     : Thursday June 04 2026
 //
 // =============================================================
 
-export type * from "./Studies";
-export type * from "./Ai";
-export type * from "./Segmentations";
-export type * from "./Analyses";
-export type * from "./Workspace";
-export type * from "./Measurements";
+import Api from "~/helpers/api/index";
+import type {
+  HuCircleMeasurement,
+  HuCircleMeasurementCreate,
+} from "~/types/Measurements";
+import type { ApiRequest } from "~/types/api";
+
+export class Measurements {
+  static createHuCircleMeasurement(
+    studyId: string,
+    payload: HuCircleMeasurementCreate,
+  ): ApiRequest<HuCircleMeasurement> {
+    return Api.post<HuCircleMeasurement, HuCircleMeasurementCreate>(
+      `/studies/${encodeURIComponent(studyId)}/measurements/hu-circle`,
+      payload,
+    );
+  }
+}
