@@ -945,6 +945,47 @@ function createMaskColorLUT(maskLabels: MaskLabelState[] = []): Types.ColorLUT {
   return lut;
 }
 
+function createMaskSegments(maskLabels: MaskLabelState[] = []) {
+  const presentLabels = maskLabels.filter(
+    (label) => Number.isFinite(label.labelId) && label.labelId > 0 && label.isPresent,
+  );
+
+  if (!presentLabels.length) {
+    return {
+      1: {
+        active: true,
+        label: "Segment 1",
+        locked: false,
+      },
+    };
+  }
+
+  return Object.fromEntries(
+    presentLabels.map((label, index) => [
+      label.labelId,
+      {
+        active: index === 0,
+        label: label.name || `Segment ${label.labelId}`,
+        locked: false,
+      },
+    ]),
+  );
+}
+
+function getMaskLabelDefinitionKey(maskLabels: MaskLabelState[] = []) {
+  return maskLabels
+    .filter((label) => Number.isFinite(label.labelId) && label.labelId > 0)
+    .map((label) =>
+      [
+        label.labelId,
+        label.isPresent ? "present" : "absent",
+        label.name,
+        label.color,
+      ].join(":"),
+    )
+    .join("|");
+}
+
 function removeSegmentationQuietly(segmentationId: string) {
   try {
     segmentation.removeSegmentation(segmentationId);
@@ -1262,6 +1303,10 @@ function VolumeRenderingArea({
     Record<string, ViewportProbeState | null>
   >({});
   const [toolMessage, setToolMessage] = useState<string | null>(null);
+  const maskLabelDefinitionKey = useMemo(
+    () => getMaskLabelDefinitionKey(maskLabels),
+    [maskLabels],
+  );
   activeToolRef.current = activeTool;
   const viewportConfigs = useMemo(() => getViewportConfigs(baseViewportId), [baseViewportId]);
   const viewportIds = useMemo(
@@ -2607,6 +2652,7 @@ function VolumeRenderingArea({
             },
             config: {
               label: "Masque Hekia",
+              segments: createMaskSegments(maskLabelsRef.current),
             },
           },
         ]);
@@ -2659,6 +2705,7 @@ function VolumeRenderingArea({
     };
   }, [
     isSceneReady,
+    maskLabelDefinitionKey,
     segmentationId,
     segmentationUrl,
     segmentationVolumeId,
