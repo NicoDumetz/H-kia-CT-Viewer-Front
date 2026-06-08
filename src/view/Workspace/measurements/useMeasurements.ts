@@ -27,6 +27,16 @@ export function useMeasurements(studyId?: string) {
   }, [measurementsByStudyId, studyId]);
 
   const addMeasurement = useCallback((measurement: MedicalMeasurement) => {
+    if (import.meta.env.DEV) {
+      console.debug("[Measurements add]", {
+        id: measurement.id,
+        sliceIndex: measurement.sliceIndex,
+        studyId: measurement.studyId,
+        type: measurement.type,
+        viewportPlane: measurement.viewportPlane,
+      });
+    }
+
     setMeasurementsByStudyId((currentState) => {
       const currentMeasurements = currentState[measurement.studyId] || [];
 

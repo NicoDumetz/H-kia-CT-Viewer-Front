@@ -74,6 +74,7 @@ import {
   getLengthMm,
   getPlaneRadiusMm,
   getSliceIndexForVoxel,
+  measurementPointToVoxel,
   toMeasurementPoint,
   voxelToMeasurementPoint,
 } from "../../measurements/measurementGeometry";
@@ -279,18 +280,12 @@ const toolNameByViewerTool: Partial<Record<ViewerTool, string>> = {
   zoom: ZoomTool.toolName,
 };
 
-function getDisplayVoiRange(
-  preset: WindowPreset,
-  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
-) {
-  const sourceType = source.metadata?.source_type?.toLowerCase();
-  const rawLevelOffset = sourceType === "dicom" ? 1024 : 0;
+function getDisplayVoiRange(preset: WindowPreset) {
   const halfWidth = preset.width / 2;
-  const displayLevel = preset.level + rawLevelOffset;
 
   return {
-    lower: displayLevel - halfWidth,
-    upper: displayLevel + halfWidth,
+    lower: preset.level - halfWidth,
+    upper: preset.level + halfWidth,
   };
 }
 
@@ -465,14 +460,8 @@ function getPresetOverlayLabel(presetId: WindowPresetId) {
 
 function getClinicalHuValue(
   value: number,
-  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+  _source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
 ) {
-  const sourceType = source.metadata?.source_type?.toLowerCase();
-
-  if (sourceType === "dicom") {
-    return value - 1024;
-  }
-
   return value;
 }
 
@@ -678,7 +667,6 @@ function worldToVoxel(
 function applyWindowPreset(
   viewports: Types.IViewport[],
   presetId: WindowPresetId,
-  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
 ) {
   const preset = getPreset(presetId);
 
@@ -690,7 +678,7 @@ function applyWindowPreset(
     }
 
     voiViewport.setProperties({
-      voiRange: getDisplayVoiRange(preset, source),
+      voiRange: getDisplayVoiRange(preset),
     });
     viewport.render();
   });
@@ -836,7 +824,9 @@ function getMeasurementDraftOverlay(
   if (lengthDraft) {
     return {
       endWorld: lengthDraft.endWorld,
+      endVoxel: lengthDraft.endVoxel || undefined,
       sliceIndex: lengthDraft.sliceIndex,
+      startVoxel: lengthDraft.startVoxel || undefined,
       startWorld: lengthDraft.startWorld,
       type: "length",
       viewportPlane: lengthDraft.plane,
@@ -846,6 +836,8 @@ function getMeasurementDraftOverlay(
   if (circleRoiDraft) {
     return {
       centerWorld: circleRoiDraft.centerWorld,
+      centerVoxel: circleRoiDraft.centerVoxel || undefined,
+      edgeVoxel: circleRoiDraft.edgeVoxel || undefined,
       edgeWorld: circleRoiDraft.edgeWorld,
       radiusMm: circleRoiDraft.radiusMm,
       sliceIndex: circleRoiDraft.sliceIndex,
@@ -1265,10 +1257,12 @@ function VolumeRenderingArea({
   const [isLoading, setIsLoading] = useState(false);
   const [isSceneReady, setIsSceneReady] = useState(false);
   const [maskOverlayStatus, setMaskOverlayStatus] = useState<MaskOverlayStatus>("idle");
+  const [overlayRenderTick, setOverlayRenderTick] = useState(0);
   const [probeByViewportId, setProbeByViewportId] = useState<
     Record<string, ViewportProbeState | null>
   >({});
   const [toolMessage, setToolMessage] = useState<string | null>(null);
+  activeToolRef.current = activeTool;
   const viewportConfigs = useMemo(() => getViewportConfigs(baseViewportId), [baseViewportId]);
   const viewportIds = useMemo(
     () => viewportConfigs.map((config) => config.id),
@@ -1302,6 +1296,10 @@ function VolumeRenderingArea({
     },
     [onMaskOverlayStatusChange],
   );
+
+  const requestMeasurementOverlayRender = useCallback(() => {
+    setOverlayRenderTick((value) => (value + 1) % 100000);
+  }, []);
 
   const setActiveViewport = useCallback((viewportId: string) => {
     const viewportKey = getPlaneByViewportId(viewportId, viewportConfigs);
@@ -1603,13 +1601,8 @@ function VolumeRenderingArea({
     [applyMprVoxel, getViewportClickVoxel, isLoading, isSceneReady, setActiveViewport],
   );
 
-  const finalizeLengthMeasurement = useCallback(
+  const getLengthMeasurementData = useCallback(
     (draft: LengthDraft, pointerData: MeasurementPointerData) => {
-      if (!studyId) {
-        setToolMessage("Etude indisponible pour la mesure.");
-        return;
-      }
-
       const pointsWorld: [MeasurementPoint, MeasurementPoint] = [
         draft.startWorld,
         pointerData.world,
@@ -1621,11 +1614,28 @@ function VolumeRenderingArea({
               MeasurementPoint,
             ])
           : undefined;
-      const lengthMm = getLengthMm({
+
+      return {
+        lengthMm: getLengthMm({
+          pointsVoxel,
+          pointsWorld,
+          spacing: source.metadata?.spacing,
+        }),
         pointsVoxel,
         pointsWorld,
-        spacing: source.metadata?.spacing,
-      });
+      };
+    },
+    [source.metadata?.spacing],
+  );
+
+  const finalizeLengthMeasurement = useCallback(
+    (draft: LengthDraft, pointerData: MeasurementPointerData) => {
+      if (!studyId) {
+        setToolMessage("Etude indisponible pour la mesure.");
+        return;
+      }
+
+      const { lengthMm, pointsVoxel, pointsWorld } = getLengthMeasurementData(draft, pointerData);
 
       if (!Number.isFinite(lengthMm) || lengthMm < 0.1) {
         setToolMessage("Distance trop courte.");
@@ -1647,7 +1657,7 @@ function VolumeRenderingArea({
       clearMeasurementDrafts();
       setToolMessage(`Distance ${lengthMm.toFixed(1)} mm`);
     },
-    [clearMeasurementDrafts, onAddMeasurement, source.metadata?.spacing, studyId],
+    [clearMeasurementDrafts, getLengthMeasurementData, onAddMeasurement, studyId],
   );
 
   const updateCircleRoiDraftFromPointer = useCallback(
@@ -1744,7 +1754,7 @@ function VolumeRenderingArea({
 
   const handleMeasurementPointerDown = useCallback(
     (event: PointerEvent<HTMLDivElement>, viewportId: string) => {
-      const tool = activeToolRef.current;
+      const tool = activeTool;
 
       if (!isCustomMeasurementTool(tool) || isLoading || !isSceneReady) {
         return false;
@@ -1833,6 +1843,7 @@ function VolumeRenderingArea({
       return true;
     },
     [
+      activeTool,
       clearMeasurementDrafts,
       finalizeCircleRoiMeasurement,
       finalizeLengthMeasurement,
@@ -1850,7 +1861,7 @@ function VolumeRenderingArea({
 
   const handleMeasurementPointerMove = useCallback(
     (event: PointerEvent<HTMLDivElement>, viewportId: string) => {
-      const tool = activeToolRef.current;
+      const tool = activeTool;
 
       if (!isCustomMeasurementTool(tool) || isLoading || !isSceneReady) {
         return false;
@@ -1897,6 +1908,7 @@ function VolumeRenderingArea({
       return true;
     },
     [
+      activeTool,
       getMeasurementPointerData,
       isLoading,
       isSceneReady,
@@ -1906,8 +1918,34 @@ function VolumeRenderingArea({
 
   const handleMeasurementPointerUp = useCallback(
     (event: PointerEvent<HTMLDivElement>, viewportId: string) => {
-      if (activeToolRef.current !== "circle_roi") {
+      if (activeTool !== "length" && activeTool !== "circle_roi") {
         return false;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (activeTool === "length") {
+        const currentDraft = lengthDraftRef.current;
+
+        if (!currentDraft || currentDraft.viewportId !== viewportId) {
+          return true;
+        }
+
+        const pointerData = getMeasurementPointerData(event, viewportId);
+
+        if (!pointerData) {
+          return true;
+        }
+
+        const { lengthMm } = getLengthMeasurementData(currentDraft, pointerData);
+
+        if (!Number.isFinite(lengthMm) || lengthMm < 0.5) {
+          return true;
+        }
+
+        finalizeLengthMeasurement(currentDraft, pointerData);
+        return true;
       }
 
       const currentDraft = circleRoiDraftRef.current;
@@ -1925,7 +1963,10 @@ function VolumeRenderingArea({
       return true;
     },
     [
+      activeTool,
       finalizeCircleRoiMeasurement,
+      finalizeLengthMeasurement,
+      getLengthMeasurementData,
       getMeasurementPointerData,
       updateCircleRoiDraftFromPointer,
     ],
@@ -1940,13 +1981,16 @@ function VolumeRenderingArea({
         return;
       }
 
-      setMprState((currentState) => ({
-        ...currentState,
-        isDraggingCrosshair: true,
-      }));
+      if (activeTool !== "crosshair") {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
       updateCrosshairPositionFromEvent(event, viewportId);
     },
     [
+      activeTool,
       handleMeasurementPointerDown,
       setActiveViewport,
       updateCrosshairPositionFromEvent,
@@ -1962,17 +2006,18 @@ function VolumeRenderingArea({
         return;
       }
 
-      if (event.buttons !== 1) {
+      if (activeTool !== "crosshair" || event.buttons !== 1) {
         return;
       }
 
+      // TODO: re-enable drag crosshair once Cornerstone slice sync is debounced
+      // enough for continuous updates. Safe mode keeps crosshair click-to-center.
       setMprState((currentState) => ({
         ...currentState,
-        isDraggingCrosshair: true,
+        isDraggingCrosshair: false,
       }));
-      updateCrosshairPositionFromEvent(event, viewportId);
     },
-    [handleMeasurementPointerMove, updateCrosshairPositionFromEvent, updateViewportProbe],
+    [activeTool, handleMeasurementPointerMove, updateViewportProbe],
   );
 
   const handleViewportPointerUp = useCallback(
@@ -2013,7 +2058,7 @@ function VolumeRenderingArea({
       });
 
       resettableViewport.setProperties?.({
-        voiRange: getDisplayVoiRange(preset, source),
+        voiRange: getDisplayVoiRange(preset),
       });
 
       viewport.render();
@@ -2087,8 +2132,8 @@ function VolumeRenderingArea({
 
   useEffect(() => {
     activePresetRef.current = activePreset;
-    applyWindowPreset(viewportsRef.current, activePreset, source);
-  }, [activePreset, source]);
+    applyWindowPreset(viewportsRef.current, activePreset);
+  }, [activePreset]);
 
   useEffect(() => {
     const initialMprState = createInitialMprState(source);
@@ -2429,7 +2474,7 @@ function VolumeRenderingArea({
         isRenderingReadyRef.current = true;
         viewportInputs.forEach((input) => resizeObserver.observe(input.element));
 
-        applyWindowPreset(nextViewports, activePresetRef.current, source);
+        applyWindowPreset(nextViewports, activePresetRef.current);
         renderingEngine.resize(true, false);
         renderingEngine.renderViewports(viewportIds);
 
@@ -2682,6 +2727,36 @@ function VolumeRenderingArea({
     }
   }, [maskOpacity, segmentationId, segmentationUrl, updateMaskOverlayStatus, viewportIds]);
 
+  useEffect(() => {
+    if (!isSceneReady) {
+      return undefined;
+    }
+
+    const viewportElements = viewportIds
+      .map((viewportId) => viewportElementsRef.current[viewportId])
+      .filter((element): element is HTMLDivElement => Boolean(element));
+    const events = [
+      Enums.Events.CAMERA_MODIFIED,
+      Enums.Events.IMAGE_RENDERED,
+      Enums.Events.VOI_MODIFIED,
+      Enums.Events.VOLUME_VIEWPORT_SCROLL,
+    ];
+
+    viewportElements.forEach((element) => {
+      events.forEach((eventName) => {
+        element.addEventListener(eventName, requestMeasurementOverlayRender);
+      });
+    });
+
+    return () => {
+      viewportElements.forEach((element) => {
+        events.forEach((eventName) => {
+          element.removeEventListener(eventName, requestMeasurementOverlayRender);
+        });
+      });
+    };
+  }, [isSceneReady, requestMeasurementOverlayRender, viewportIds]);
+
   const shouldShowLoading = !error && (isLoading || !isSceneReady);
   const getCrosshairPositionForViewport = useCallback(
     (config: ViewportConfig): CrosshairPosition => {
@@ -2771,6 +2846,24 @@ function VolumeRenderingArea({
             return null;
           }
         };
+        const projectVoxelToCanvas = (point: MeasurementPoint) => {
+          const element = viewportElementsRef.current[config.id];
+
+          if (!element?.clientWidth || !element.clientHeight) {
+            return null;
+          }
+
+          const position = getVoxelCrosshairPosition(
+            measurementPointToVoxel(point),
+            source,
+            config.key,
+          );
+
+          return {
+            x: position.x * element.clientWidth,
+            y: position.y * element.clientHeight,
+          };
+        };
 
         return (
           <ViewportFrame
@@ -2828,9 +2921,12 @@ function VolumeRenderingArea({
               measurements={measurements}
               onSelectMeasurement={(measurementId) => onSelectMeasurement?.(measurementId)}
               plane={config.key}
+              projectVoxelToCanvas={projectVoxelToCanvas}
               projectWorldToCanvas={projectWorldToCanvas}
+              renderTick={overlayRenderTick}
               selectedMeasurementId={selectedMeasurementId}
               sliceIndex={sliceIndex}
+              sliceTolerance={1}
             />
           ) : null}
           </ViewportFrame>

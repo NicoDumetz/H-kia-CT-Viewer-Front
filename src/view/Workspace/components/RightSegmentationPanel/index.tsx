@@ -28,9 +28,13 @@ import type { MedicalMeasurement } from "../../measurements/measurementTypes";
 
 type RightSegmentationPanelProps = {
   activeTool: ViewerTool;
+  aiModuleStatus: string;
   aiUnavailableMessage: string | null;
+  aiRunStatus: string | null;
+  canPublishAiSegmentation: boolean;
   canRunAi: boolean;
   isAiPredicting: boolean;
+  isAiPublishing: boolean;
   isBusy: boolean;
   isMaskVisible: boolean;
   maskLabels: MaskLabelState[];
@@ -44,6 +48,7 @@ type RightSegmentationPanelProps = {
   onDeleteMeasurement: (measurementId: string) => void;
   onFocusMeasurement: (measurement: MedicalMeasurement) => void;
   onMaskOpacityChange: (opacity: number) => void;
+  onPublishAiSegmentation: () => void;
   onResetMeasurements: () => void;
   onRunAiPrediction: () => void;
   onSelectMeasurement: (measurementId: string | null) => void;
@@ -88,9 +93,13 @@ function getMaskPanelOverlayStatus(
 
 export function RightSegmentationPanel({
   activeTool,
+  aiModuleStatus,
   aiUnavailableMessage,
+  aiRunStatus,
+  canPublishAiSegmentation,
   canRunAi,
   isAiPredicting,
+  isAiPublishing,
   isBusy,
   isMaskVisible,
   maskLabels,
@@ -102,6 +111,7 @@ export function RightSegmentationPanel({
   onDeleteMeasurement,
   onFocusMeasurement,
   onMaskOpacityChange,
+  onPublishAiSegmentation,
   onResetMeasurements,
   onRunAiPrediction,
   onSelectMeasurement,
@@ -159,6 +169,11 @@ export function RightSegmentationPanel({
       </PanelSection>
 
       <PanelSection title="IA">
+        <div className="mb-2 rounded border border-border-soft bg-surface-100 p-2 text-xs">
+          <p className="text-text-muted">Module</p>
+          <p className="font-semibold text-text">ct_anatomy_segmentation_nnunet</p>
+          <p className="mt-1 text-text-muted">Status: {aiModuleStatus}</p>
+        </div>
         <button
           className={cn(
             "h-9 w-full rounded border text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50",
@@ -166,12 +181,25 @@ export function RightSegmentationPanel({
               ? "border-primary/60 bg-primary/20 text-primary-100 hover:border-primary"
               : "border-border-soft bg-surface-100 text-text-muted",
           )}
-          disabled={!canRunAi || isBusy}
+          disabled={!canRunAi || isBusy || isAiPredicting}
           onClick={onRunAiPrediction}
           type="button"
         >
-          {isAiPredicting ? "Prédiction en cours..." : "Lancer prediction IA"}
+          {isAiPredicting ? "Running AI..." : "Run AI segmentation"}
         </button>
+        {canPublishAiSegmentation ? (
+          <button
+            className="mt-2 h-8 w-full rounded border border-primary/50 bg-surface-100 text-xs font-semibold text-primary-100 transition hover:border-primary disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={isAiPublishing}
+            onClick={onPublishAiSegmentation}
+            type="button"
+          >
+            {isAiPublishing ? "Publishing segmentation..." : "Publish segmentation"}
+          </button>
+        ) : null}
+        {aiRunStatus ? (
+          <p className="mt-2 text-xs leading-relaxed text-text-muted">{aiRunStatus}</p>
+        ) : null}
         {aiUnavailableMessage ? (
           <p className="mt-2 text-xs leading-relaxed text-quaternary-100">{aiUnavailableMessage}</p>
         ) : null}

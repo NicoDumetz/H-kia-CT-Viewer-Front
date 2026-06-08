@@ -54,6 +54,8 @@ type ToolbarItem<TId extends string> = {
 
 type TopToolBarProps = {
   activeTool: ViewerTool;
+  aiModuleStatus: string;
+  aiRunStatus: string | null;
   canRunAi: boolean;
   isAiPredicting: boolean;
   isBusy: boolean;
@@ -173,6 +175,8 @@ function CompactButton({
 
 export function TopToolBar({
   activeTool,
+  aiModuleStatus,
+  aiRunStatus,
   canRunAi,
   isAiPredicting,
   isBusy,
@@ -285,14 +289,14 @@ export function TopToolBar({
         <span
           className={cn(
             "hidden h-2 w-2 rounded-full sm:block",
-            canRunAi ? "bg-secondary" : "bg-warning",
+            aiModuleStatus === "Ready" ? "bg-secondary" : "bg-warning",
           )}
-          title={canRunAi ? "IA disponible" : "IA indisponible"}
+          title={`IA ${aiModuleStatus}`}
         />
         <CompactButton
           active={isAiPredicting}
-          disabled={!canRunAi || isBusy}
-          label={isAiPredicting ? "IA en cours" : "Lancer l'IA"}
+          disabled={!canRunAi || isBusy || isAiPredicting}
+          label={isAiPredicting ? aiRunStatus || "IA en cours" : "Lancer l'IA"}
           onClick={onRunAiPrediction}
         >
           <PsychologyRoundedIcon fontSize="small" />

@@ -65,6 +65,8 @@ export type MeasurementDraft =
       sliceIndex: number;
       startWorld: MeasurementPoint;
       endWorld: MeasurementPoint;
+      startVoxel?: MeasurementPoint;
+      endVoxel?: MeasurementPoint;
     }
   | {
       type: "circle_roi";
@@ -72,6 +74,8 @@ export type MeasurementDraft =
       sliceIndex: number;
       centerWorld: MeasurementPoint;
       edgeWorld: MeasurementPoint;
+      centerVoxel?: MeasurementPoint;
+      edgeVoxel?: MeasurementPoint;
       radiusMm: number;
     };
 

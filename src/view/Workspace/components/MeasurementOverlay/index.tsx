@@ -29,9 +29,12 @@ type MeasurementOverlayProps = {
   draft: MeasurementDraft | null;
   measurements: MedicalMeasurement[];
   plane: MeasurementPlane;
+  projectVoxelToCanvas: (point: MeasurementPoint) => ProjectedPoint | null;
   projectWorldToCanvas: (point: MeasurementPoint) => ProjectedPoint | null;
+  renderTick?: number;
   selectedMeasurementId: string | null;
   sliceIndex: number;
+  sliceTolerance?: number;
   onSelectMeasurement: (measurementId: string) => void;
 };
 
@@ -39,8 +42,42 @@ function isMeasurementVisible(
   measurement: MedicalMeasurement,
   plane: MeasurementPlane,
   sliceIndex: number,
+  sliceTolerance: number,
 ) {
-  return measurement.viewportPlane === plane && measurement.sliceIndex === sliceIndex;
+  return (
+    measurement.viewportPlane === plane &&
+    Math.abs(measurement.sliceIndex - sliceIndex) <= sliceTolerance
+  );
+}
+
+function isValidProjectedPoint(point: ProjectedPoint | null) {
+  return Boolean(
+    point &&
+      Number.isFinite(point.x) &&
+      Number.isFinite(point.y),
+  );
+}
+
+function projectMedicalPoint({
+  projectVoxelToCanvas,
+  projectWorldToCanvas,
+  voxel,
+  world,
+}: {
+  projectVoxelToCanvas: (point: MeasurementPoint) => ProjectedPoint | null;
+  projectWorldToCanvas: (point: MeasurementPoint) => ProjectedPoint | null;
+  voxel?: MeasurementPoint;
+  world?: MeasurementPoint;
+}) {
+  const worldPoint = world ? projectWorldToCanvas(world) : null;
+
+  if (isValidProjectedPoint(worldPoint)) {
+    return worldPoint;
+  }
+
+  const voxelPoint = voxel ? projectVoxelToCanvas(voxel) : null;
+
+  return isValidProjectedPoint(voxelPoint) ? voxelPoint : null;
 }
 
 function getCircleRadius(
@@ -88,16 +125,22 @@ export function MeasurementOverlay({
   measurements,
   onSelectMeasurement,
   plane,
+  projectVoxelToCanvas,
   projectWorldToCanvas,
+  renderTick,
   selectedMeasurementId,
   sliceIndex,
+  sliceTolerance = 1,
 }: MeasurementOverlayProps) {
   const visibleMeasurements = measurements.filter((measurement) =>
-    isMeasurementVisible(measurement, plane, sliceIndex),
+    isMeasurementVisible(measurement, plane, sliceIndex, sliceTolerance),
   );
 
   return (
-    <div className="pointer-events-none absolute inset-0 z-30 overflow-hidden">
+    <div
+      className="pointer-events-none absolute inset-0 z-30 overflow-hidden"
+      data-render-tick={renderTick}
+    >
       <svg className="absolute inset-0 h-full w-full">
         {visibleMeasurements.map((measurement) => {
           const isSelected = selectedMeasurementId === measurement.id;
@@ -112,8 +155,18 @@ export function MeasurementOverlay({
           };
 
           if (measurement.type === "length") {
-            const start = projectWorldToCanvas(measurement.pointsWorld[0]);
-            const end = projectWorldToCanvas(measurement.pointsWorld[1]);
+            const start = projectMedicalPoint({
+              projectVoxelToCanvas,
+              projectWorldToCanvas,
+              voxel: measurement.pointsVoxel?.[0],
+              world: measurement.pointsWorld[0],
+            });
+            const end = projectMedicalPoint({
+              projectVoxelToCanvas,
+              projectWorldToCanvas,
+              voxel: measurement.pointsVoxel?.[1],
+              world: measurement.pointsWorld[1],
+            });
 
             if (!start || !end) {
               return null;
@@ -136,7 +189,12 @@ export function MeasurementOverlay({
           }
 
           if (measurement.type === "hu_probe") {
-            const point = projectWorldToCanvas(measurement.pointWorld);
+            const point = projectMedicalPoint({
+              projectVoxelToCanvas,
+              projectWorldToCanvas,
+              voxel: measurement.pointVoxel,
+              world: measurement.pointWorld,
+            });
 
             if (!point) {
               return null;
@@ -156,10 +214,18 @@ export function MeasurementOverlay({
             );
           }
 
-          const center = projectWorldToCanvas(measurement.centerWorld);
-          const edge = measurement.edgeWorld
-            ? projectWorldToCanvas(measurement.edgeWorld)
-            : null;
+          const center = projectMedicalPoint({
+            projectVoxelToCanvas,
+            projectWorldToCanvas,
+            voxel: measurement.centerVoxel,
+            world: measurement.centerWorld,
+          });
+          const edge = projectMedicalPoint({
+            projectVoxelToCanvas,
+            projectWorldToCanvas,
+            voxel: measurement.edgeVoxel,
+            world: measurement.edgeWorld,
+          });
           const radius = getCircleRadius(center, edge);
 
           if (!center || radius <= 0) {
@@ -181,8 +247,18 @@ export function MeasurementOverlay({
         })}
 
         {draft?.type === "length" ? (() => {
-          const start = projectWorldToCanvas(draft.startWorld);
-          const end = projectWorldToCanvas(draft.endWorld);
+          const start = projectMedicalPoint({
+            projectVoxelToCanvas,
+            projectWorldToCanvas,
+            voxel: draft.startVoxel,
+            world: draft.startWorld,
+          });
+          const end = projectMedicalPoint({
+            projectVoxelToCanvas,
+            projectWorldToCanvas,
+            voxel: draft.endVoxel,
+            world: draft.endWorld,
+          });
 
           if (!start || !end) {
             return null;
@@ -206,8 +282,18 @@ export function MeasurementOverlay({
         })() : null}
 
         {draft?.type === "circle_roi" ? (() => {
-          const center = projectWorldToCanvas(draft.centerWorld);
-          const edge = projectWorldToCanvas(draft.edgeWorld);
+          const center = projectMedicalPoint({
+            projectVoxelToCanvas,
+            projectWorldToCanvas,
+            voxel: draft.centerVoxel,
+            world: draft.centerWorld,
+          });
+          const edge = projectMedicalPoint({
+            projectVoxelToCanvas,
+            projectWorldToCanvas,
+            voxel: draft.edgeVoxel,
+            world: draft.edgeWorld,
+          });
           const radius = getCircleRadius(center, edge);
 
           if (!center || radius <= 0) {
@@ -237,8 +323,18 @@ export function MeasurementOverlay({
           : measurement.color;
         const labelPoint = (() => {
           if (measurement.type === "length") {
-            const start = projectWorldToCanvas(measurement.pointsWorld[0]);
-            const end = projectWorldToCanvas(measurement.pointsWorld[1]);
+            const start = projectMedicalPoint({
+              projectVoxelToCanvas,
+              projectWorldToCanvas,
+              voxel: measurement.pointsVoxel?.[0],
+              world: measurement.pointsWorld[0],
+            });
+            const end = projectMedicalPoint({
+              projectVoxelToCanvas,
+              projectWorldToCanvas,
+              voxel: measurement.pointsVoxel?.[1],
+              world: measurement.pointsWorld[1],
+            });
 
             if (!start || !end) {
               return null;
@@ -251,10 +347,20 @@ export function MeasurementOverlay({
           }
 
           if (measurement.type === "hu_probe") {
-            return projectWorldToCanvas(measurement.pointWorld);
+            return projectMedicalPoint({
+              projectVoxelToCanvas,
+              projectWorldToCanvas,
+              voxel: measurement.pointVoxel,
+              world: measurement.pointWorld,
+            });
           }
 
-          return projectWorldToCanvas(measurement.centerWorld);
+          return projectMedicalPoint({
+            projectVoxelToCanvas,
+            projectWorldToCanvas,
+            voxel: measurement.centerVoxel,
+            world: measurement.centerWorld,
+          });
         })();
 
         if (!labelPoint) {

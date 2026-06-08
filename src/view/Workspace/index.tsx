@@ -45,7 +45,7 @@ import type {
 import { getMeasurementPrimaryPoint } from "./measurements/measurementGeometry";
 import type { MedicalMeasurement } from "./measurements/measurementTypes";
 import { useMeasurements } from "./measurements/useMeasurements";
-import type { AiRunCreate } from "~/types/Ai";
+import type { AiRun, AiRunCreate } from "~/types/Ai";
 import type {
   Study,
   StudyViewerResponse,
@@ -55,7 +55,80 @@ import type {
 import type { StudyWorkspace } from "~/types/Workspace";
 
 const simulationModuleId = "ct_anatomy_segmentation_nnunet";
+const aiPollIntervalMs = 3000;
+const aiPollTimeoutMs = 30 * 60 * 1000;
 const preparableInputTypes = new Set(["nifti", "dicom", "dicomdir"]);
+
+function wait(ms: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+async function waitForAiRunCompletion({
+  initialRun,
+  onRunUpdate,
+  shouldContinue,
+  studyId,
+}: {
+  initialRun: AiRun;
+  onRunUpdate: (run: AiRun) => void;
+  shouldContinue: () => boolean;
+  studyId: string;
+}) {
+  let currentRun = initialRun;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt <= aiPollTimeoutMs) {
+    if (!shouldContinue()) {
+      return null;
+    }
+
+    onRunUpdate(currentRun);
+
+    if (currentRun.status === "succeeded") {
+      return currentRun;
+    }
+
+    if (currentRun.status === "failed") {
+      throw new Error(currentRun.error || "Prediction IA echouee.");
+    }
+
+    if (currentRun.status === "cancelled") {
+      throw new Error("Prediction IA annulee.");
+    }
+
+    await wait(aiPollIntervalMs);
+
+    if (!shouldContinue()) {
+      return null;
+    }
+
+    currentRun = (await Ai.getRun(studyId, currentRun.id)).data;
+  }
+
+  throw new Error("Prediction IA trop longue. Le run continue peut-etre cote backend.");
+}
+
+function formatAiRunStatus(run: AiRun) {
+  if (run.status === "pending") {
+    return "pending";
+  }
+
+  if (run.status === "running") {
+    return "running";
+  }
+
+  if (run.status === "succeeded") {
+    return "succeeded";
+  }
+
+  if (run.status === "failed") {
+    return `failed${run.error ? ` - ${run.error}` : ""}`;
+  }
+
+  return run.status;
+}
 
 function getRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object") {
@@ -461,6 +534,10 @@ export default function Workspace() {
   const [isLoading, setIsLoading] = useState(true);
   const [isBusy, setIsBusy] = useState(false);
   const [isAiPredicting, setIsAiPredicting] = useState(false);
+  const [isAiPublishing, setIsAiPublishing] = useState(false);
+  const [lastAiRun, setLastAiRun] = useState<AiRun | null>(null);
+  const [publishedAiRunId, setPublishedAiRunId] = useState<string | null>(null);
+  const [aiRunStatus, setAiRunStatus] = useState<string | null>(null);
   const [isAutoPreparing, setIsAutoPreparing] = useState(false);
   const [isMaskVisible, setIsMaskVisible] = useState(true);
   const [activeViewerTool, setActiveViewerTool] = useState<ViewerTool>("crosshair");
@@ -473,7 +550,9 @@ export default function Workspace() {
   const [maskOverlayStatus, setMaskOverlayStatus] = useState<MaskOverlayStatus>("idle");
   const [maskOpacity, setMaskOpacity] = useState(0.6);
   const [error, setError] = useState<string | null>(null);
+  const aiRunRequestIdRef = useRef(0);
   const autoPreparedStudyIdsRef = useRef<Set<string>>(new Set());
+  const isWorkspaceMountedRef = useRef(true);
   const loadRequestIdRef = useRef(0);
   const {
     addMeasurement,
@@ -500,16 +579,23 @@ export default function Workspace() {
       loadRequestIdRef.current = loadRequestId;
 
       try {
-        const [workspaceResponse, studiesResponse] = await Promise.all([
+        const [workspaceResponse, studiesResponse, aiModulesResponse] = await Promise.all([
           WorkspaceApi.getWorkspace(studyId),
           Studies.getStudies(),
+          Ai.getModules(),
         ]);
 
         if (loadRequestId !== loadRequestIdRef.current) {
           return;
         }
 
-        const nextWorkspace = workspaceResponse.data;
+        const nextWorkspace = {
+          ...workspaceResponse.data,
+          ai: {
+            ...workspaceResponse.data.ai,
+            modules: aiModulesResponse.data.items,
+          },
+        };
         const nextViewer = normalizeViewer(nextWorkspace.viewer);
         const nextVolume = nextWorkspace.volume.data;
 
@@ -561,27 +647,164 @@ export default function Workspace() {
     });
   };
 
+  const publishAiRunSegmentation = useCallback(
+    async (run: AiRun, requestId?: number) => {
+      if (!studyId) {
+        throw new Error("Identifiant d'etude manquant.");
+      }
+
+      const shouldContinue = () =>
+        requestId == null ||
+        (isWorkspaceMountedRef.current && aiRunRequestIdRef.current === requestId);
+
+      if (!shouldContinue()) {
+        return;
+      }
+
+      setIsAiPublishing(true);
+      setAiRunStatus("Publishing segmentation...");
+
+      try {
+        const segmentationResponse = await Ai.publishSegmentation(studyId, run.id);
+
+        if (!shouldContinue()) {
+          return;
+        }
+
+        setPublishedAiRunId(run.id);
+        setAiRunStatus("Segmentation ready");
+
+        try {
+          await Promise.all([
+            Segmentations.getSegmentations(studyId),
+            Segmentations.getSegmentationLabels(studyId, segmentationResponse.data.id),
+          ]);
+          setMaskLabelsMessage(null);
+        } catch (labelsError) {
+          setMaskLabelsMessage(
+            `Segmentation published but labels failed: ${getErrorMessage(labelsError)}`,
+          );
+        }
+
+        if (shouldContinue()) {
+          await loadWorkspace();
+        }
+      } finally {
+        if (shouldContinue()) {
+          setIsAiPublishing(false);
+        }
+      }
+    },
+    [loadWorkspace, studyId],
+  );
+
   const handleRunAiPrediction = () => {
+    if (isAiPredicting || isAiPublishing) {
+      return;
+    }
+
+    const requestId = aiRunRequestIdRef.current + 1;
+    aiRunRequestIdRef.current = requestId;
     setIsAiPredicting(true);
-    void runAction(async () => {
-      if (!studyId || !workspace) {
-        throw new Error("Workspace indisponible.");
+    setLastAiRun(null);
+    setPublishedAiRunId(null);
+    setAiRunStatus("Creating run...");
+    setError(null);
+
+    void (async () => {
+      try {
+        if (!studyId || !workspace) {
+          throw new Error("Workspace indisponible.");
+        }
+
+        const nnunetModule = workspace.ai.modules.find((module) => module.id === simulationModuleId);
+
+        if (!nnunetModule) {
+          throw new Error("Module IA ct_anatomy_segmentation_nnunet introuvable.");
+        }
+
+        if (!nnunetModule.is_available || nnunetModule.availability_error) {
+          throw new Error(nnunetModule.availability_error || "Module IA indisponible.");
+        }
+
+        if (!workspace.volume.is_prepared) {
+          throw new Error("Preparez le volume avant de lancer l'IA.");
+        }
+
+        if (!workspace.available_actions.can_execute_ai) {
+          throw new Error("Execution IA indisponible pour cette etude.");
+        }
+
+        const payload: AiRunCreate = {
+          module_id: simulationModuleId,
+        };
+        const shouldContinue = () =>
+          isWorkspaceMountedRef.current && aiRunRequestIdRef.current === requestId;
+        const runResponse = await Ai.createRun(studyId, payload);
+        const run = runResponse.data;
+
+        if (!shouldContinue()) {
+          return;
+        }
+
+        setLastAiRun(run);
+        setAiRunStatus(`Created run ${run.id.slice(0, 8)} (${formatAiRunStatus(run)})`);
+        const executionResponse = await Ai.executeRun(studyId, run.id);
+
+        if (!shouldContinue()) {
+          return;
+        }
+
+        setAiRunStatus(`Running AI... (${formatAiRunStatus(executionResponse.data)})`);
+        const completedRun = await waitForAiRunCompletion({
+          initialRun: executionResponse.data,
+          onRunUpdate: (nextRun) => {
+            if (!shouldContinue()) {
+              return;
+            }
+
+            setLastAiRun(nextRun);
+            setAiRunStatus(formatAiRunStatus(nextRun));
+          },
+          shouldContinue,
+          studyId,
+        });
+
+        if (!completedRun || !shouldContinue()) {
+          return;
+        }
+
+        setLastAiRun(completedRun);
+        setAiRunStatus("succeeded");
+        await publishAiRunSegmentation(completedRun, requestId);
+      } catch (predictionError) {
+        if (!isWorkspaceMountedRef.current || aiRunRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        const message = getErrorMessage(predictionError);
+
+        setError(message);
+        setAiRunStatus(`Failed - ${message}`);
+      } finally {
+        if (isWorkspaceMountedRef.current && aiRunRequestIdRef.current === requestId) {
+          setIsAiPredicting(false);
+        }
       }
+    })();
+  };
 
-      const payload: AiRunCreate = {
-        module_id: simulationModuleId,
-      };
-      const runResponse = await Ai.createRun(studyId, payload);
-      const run = runResponse.data;
+  const handlePublishAiSegmentation = () => {
+    if (!lastAiRun || lastAiRun.status !== "succeeded" || lastAiRun.id === publishedAiRunId) {
+      return;
+    }
 
-      if (workspace.available_actions.can_execute_ai) {
-        await Ai.executeRun(studyId, run.id);
-      } else {
-        await Ai.simulateRun(studyId, run.id);
-      }
+    void publishAiRunSegmentation(lastAiRun).catch((publishError) => {
+      const message = getErrorMessage(publishError);
 
-      await Ai.publishSegmentation(studyId, run.id);
-    }).finally(() => setIsAiPredicting(false));
+      setError(message);
+      setAiRunStatus(`Publish failed - ${message}`);
+    });
   };
 
   const handleUploadSegmentation = (file: File, name?: string, labelsFile?: File) => {
@@ -726,6 +949,21 @@ export default function Workspace() {
   }, [loadWorkspace]);
 
   useEffect(() => {
+    isWorkspaceMountedRef.current = true;
+
+    return () => {
+      isWorkspaceMountedRef.current = false;
+      aiRunRequestIdRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    aiRunRequestIdRef.current += 1;
+    setIsAiPredicting(false);
+    setIsAiPublishing(false);
+    setLastAiRun(null);
+    setPublishedAiRunId(null);
+    setAiRunStatus(null);
     setCrosshairTarget(null);
     setViewerMode("mpr");
     setWindowPreset("soft");
@@ -874,11 +1112,32 @@ export default function Workspace() {
   const isWorkspaceBusy = isBusy || isAutoPreparing;
   const allowDicomFallback = !workspace.volume.is_prepared && !canPrepareVolume && !isWorkspaceBusy;
   const nnunetModule = workspace.ai.modules.find((module) => module.id === simulationModuleId);
+  const isAiModuleAvailable = Boolean(nnunetModule?.is_available && !nnunetModule.availability_error);
   const canRunAi =
     workspace.available_actions.can_create_ai_run &&
+    workspace.available_actions.can_execute_ai &&
     workspace.volume.is_prepared &&
-    Boolean(nnunetModule?.is_available);
-  const aiUnavailableMessage = nnunetModule?.availability_error || null;
+    isAiModuleAvailable &&
+    !isAiPredicting &&
+    !isAiPublishing;
+  const aiUnavailableMessage =
+    nnunetModule?.availability_error ||
+    (!nnunetModule
+      ? "Module IA ct_anatomy_segmentation_nnunet introuvable."
+      : !workspace.volume.is_prepared
+        ? "Préparez le volume avant de lancer l'IA."
+        : !workspace.available_actions.can_execute_ai
+          ? "Execution IA indisponible pour cette etude."
+          : null);
+  const aiModuleStatus = nnunetModule
+    ? isAiModuleAvailable
+      ? "Ready"
+      : "Unavailable"
+    : "Missing";
+  const canPublishAiSegmentation =
+    Boolean(lastAiRun && lastAiRun.status === "succeeded" && lastAiRun.id !== publishedAiRunId) &&
+    !isAiPredicting &&
+    !isAiPublishing;
 
   return (
     <ViewerShell
@@ -928,9 +1187,13 @@ export default function Workspace() {
       rightPanel={
         <RightSegmentationPanel
           activeTool={activeViewerTool}
+          aiModuleStatus={aiModuleStatus}
           aiUnavailableMessage={aiUnavailableMessage}
+          aiRunStatus={aiRunStatus}
+          canPublishAiSegmentation={canPublishAiSegmentation}
           canRunAi={canRunAi}
           isAiPredicting={isAiPredicting}
+          isAiPublishing={isAiPublishing}
           isBusy={isWorkspaceBusy}
           isMaskVisible={isMaskVisible}
           maskLabels={maskLabels}
@@ -942,6 +1205,7 @@ export default function Workspace() {
           onDeleteMeasurement={deleteMeasurement}
           onFocusMeasurement={handleFocusMeasurement}
           onMaskOpacityChange={handleMaskOpacityChange}
+          onPublishAiSegmentation={handlePublishAiSegmentation}
           onResetMeasurements={resetMeasurements}
           onRunAiPrediction={handleRunAiPrediction}
           onSelectMeasurement={selectMeasurement}
@@ -958,6 +1222,8 @@ export default function Workspace() {
       toolbar={
         <TopToolBar
           activeTool={activeViewerTool}
+          aiModuleStatus={aiModuleStatus}
+          aiRunStatus={aiRunStatus}
           canRunAi={canRunAi}
           isAiPredicting={isAiPredicting}
           isBusy={isWorkspaceBusy}
