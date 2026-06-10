@@ -80,7 +80,10 @@ export class Studies {
     );
   }
 
-  static uploadDicom(files: File[]): ApiRequest<StudyPrepareResponse> {
+  static uploadDicom(
+    files: File[],
+    onProgress?: (progress: number) => void,
+  ): ApiRequest<StudyPrepareResponse> {
     const formData = new FormData();
 
     files.forEach((file) => {
@@ -93,6 +96,15 @@ export class Studies {
     return Api.post<StudyPrepareResponse, FormData>(
       `${Studies.endpoint}/upload-dicom`,
       formData,
+      {
+        onUploadProgress: (event) => {
+          if (!event.total || !onProgress) {
+            return;
+          }
+
+          onProgress(Math.round((event.loaded / event.total) * 100));
+        },
+      },
     );
   }
 

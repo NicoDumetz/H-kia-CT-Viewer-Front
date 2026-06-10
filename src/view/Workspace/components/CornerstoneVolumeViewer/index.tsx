@@ -219,6 +219,7 @@ type CornerstoneVolumeViewerProps = {
   onActiveToolChange?: (tool: ViewerTool) => void;
   onMaskOverlayStatusChange?: (status: MaskOverlayStatus) => void;
   onSelectMeasurement?: (measurementId: string | null) => void;
+  onSceneReady?: () => void;
   onViewerModeChange?: (mode: ViewerLayoutMode) => void;
   onWindowPresetChange?: (preset: WindowPresetId) => void;
   studyId?: string;
@@ -246,6 +247,7 @@ type VolumeRenderingAreaProps = {
   onRotateViewport: (viewportKey: MprViewportKey, direction: "left" | "right") => void;
   onMaskOverlayStatusChange?: (status: MaskOverlayStatus) => void;
   onSelectMeasurement?: (measurementId: string | null) => void;
+  onSceneReady?: () => void;
   onPresetChange: (preset: WindowPresetId) => void;
   onViewportDoubleClick?: (viewportKey: MprViewportKey) => void;
   renderingEngineId: string;
@@ -1500,6 +1502,7 @@ function VolumeRenderingArea({
   onResetViewportDisplayTransform,
   onMaskOverlayStatusChange,
   onRotateViewport,
+  onSceneReady,
   onSelectMeasurement,
   onPresetChange,
   onViewportDoubleClick,
@@ -2872,6 +2875,8 @@ function VolumeRenderingArea({
         isRenderingReadyRef.current = true;
         viewportInputs.forEach((input) => resizeObserver.observe(input.element));
 
+        const initialSliceIndexByPlane = createInitialMprState(source).sliceIndexByPlane;
+
         applyWindowPreset(nextViewports, activePresetRef.current);
         viewportConfigs.forEach((config) => {
           applyViewportDisplayTransform(
@@ -2881,11 +2886,49 @@ function VolumeRenderingArea({
         });
         renderingEngine.resize(true, false);
         renderingEngine.renderViewports(viewportIds);
+        viewportConfigs.forEach((config) => {
+          const element = viewportElementsRef.current[config.id];
+          const imageIndex = initialSliceIndexByPlane[config.key];
 
+          if (!element) {
+            return;
+          }
+
+          requestedSliceByViewportIdRef.current[config.id] = imageIndex;
+
+          void cornerstoneUtilities
+            .jumpToSlice(element, {
+              debounceLoading: false,
+              imageIndex,
+              volumeId,
+            })
+            .then(() => {
+              if (isCancelled || setupToken !== setupTokenRef.current) {
+                return;
+              }
+
+              viewportsByIdRef.current[config.id]?.render();
+              renderingEngine?.renderViewports([config.id]);
+            })
+            .catch((syncError) => {
+              if (import.meta.env.DEV) {
+                console.warn("[Cornerstone MPR initial sync]", syncError);
+              }
+            });
+        });
+
+        await waitForFinalPaint();
+        if (isCancelled || setupToken !== setupTokenRef.current) {
+          return;
+        }
+
+        renderingEngine.resize(true, false);
+        renderingEngine.renderViewports(viewportIds);
         await waitForFinalPaint();
 
         if (!isCancelled && setupToken === setupTokenRef.current) {
           setIsSceneReady(true);
+          onSceneReady?.();
         }
       } catch (setupError) {
         resizeObserver.disconnect();
@@ -2949,6 +2992,7 @@ function VolumeRenderingArea({
     source,
     toolGroupId,
     updateMaskOverlayStatus,
+    onSceneReady,
     viewportConfigs,
     viewportIds,
     volumeId,
@@ -3420,6 +3464,7 @@ export function CornerstoneVolumeViewer({
   onAddMeasurement,
   onActiveToolChange,
   onMaskOverlayStatusChange,
+  onSceneReady,
   onSelectMeasurement,
   onViewerModeChange,
   onWindowPresetChange,
@@ -3564,6 +3609,7 @@ export function CornerstoneVolumeViewer({
             onResetAllViewportDisplayTransforms={handleResetAllViewportDisplayTransforms}
             onResetViewportDisplayTransform={handleResetViewportDisplayTransform}
             onRotateViewport={handleRotateViewport}
+            onSceneReady={onSceneReady}
             onSelectMeasurement={onSelectMeasurement}
             onPresetChange={handleWindowPresetChange}
             onViewportDoubleClick={(viewportKey) => {

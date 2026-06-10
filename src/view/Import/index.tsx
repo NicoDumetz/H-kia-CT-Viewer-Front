@@ -21,10 +21,7 @@ import { useNavigate } from "react-router-dom";
 import { Studies } from "~/api";
 import { Badge } from "~/components";
 import { buildLocalDicomStudy } from "~/helpers/LocalDicom";
-import {
-  createLocalStudyImport,
-  startLocalStudyBackendImport,
-} from "~/helpers/LocalStudyImport";
+import { createLocalStudyImport } from "~/helpers/LocalStudyImport";
 import { ImportPanel } from "./components";
 
 function getRecord(value: unknown): Record<string, unknown> | null {
@@ -106,7 +103,6 @@ export default function Import() {
         const localDicom = await buildLocalDicomStudy(files);
         const localStudy = createLocalStudyImport(files, localDicom);
 
-        startLocalStudyBackendImport(localStudy.id);
         navigate(`/studies/${encodeURIComponent(localStudy.id)}/workspace`);
         return;
       }

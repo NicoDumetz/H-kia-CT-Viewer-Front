@@ -226,7 +226,16 @@ async function uploadWithLegacyEndpoint(localStudyId: string, startedAt: number)
     return;
   }
 
-  const response = await Studies.uploadDicom(currentImport.files);
+  const response = await Studies.uploadDicom(currentImport.files, (progress) => {
+    const uploadProgress = Math.max(1, Math.min(95, progress));
+    const isUploadComplete = progress >= 100;
+
+    patchLocalImport(localStudyId, {
+      backendStatus: isUploadComplete ? "conversion en cours" : "uploading",
+      status: isUploadComplete ? "BACKEND_PROCESSING" : "UPLOADING",
+      uploadProgress,
+    });
+  });
   const studyId = getBackendStudyId(response.data);
 
   if (!studyId) {

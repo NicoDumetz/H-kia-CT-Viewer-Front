@@ -624,6 +624,7 @@ function MedicalViewerShell({
   onMaskOverlayStatusChange,
   onPrepareVolume,
   onSelectMeasurement,
+  onLocalSceneReady,
   onViewerModeChange,
   onWindowPresetChange,
   segmentationUrl,
@@ -653,6 +654,7 @@ function MedicalViewerShell({
   onAddMeasurement: (measurement: MedicalMeasurement) => void;
   onActiveToolChange: (tool: ViewerTool) => void;
   onMaskOverlayStatusChange: (status: MaskOverlayStatus) => void;
+  onLocalSceneReady: () => void;
   onSelectMeasurement: (measurementId: string | null) => void;
   onPrepareVolume: () => void;
   segmentationUrl: string | null;
@@ -664,7 +666,7 @@ function MedicalViewerShell({
 }) {
   const cornerstoneSource = useMemo(
     () => getCornerstoneSource({ allowDicomFallback, localImport, viewer, volume }),
-    [allowDicomFallback, localImport, viewer, volume],
+    [allowDicomFallback, localImport?.id, localImport?.localDicom, viewer, volume],
   );
   const isReady = Boolean(cornerstoneSource);
   const unavailableMessage = getUnavailableViewerMessage(inputType);
@@ -731,6 +733,7 @@ function MedicalViewerShell({
         onActiveToolChange={onActiveToolChange}
         onMaskOverlayStatusChange={onMaskOverlayStatusChange}
         onSelectMeasurement={onSelectMeasurement}
+        onSceneReady={localImport ? onLocalSceneReady : undefined}
         onViewerModeChange={onViewerModeChange}
         onWindowPresetChange={onWindowPresetChange}
         segmentationUrl={segmentationUrl}
@@ -1172,6 +1175,22 @@ export default function Workspace() {
     setActiveViewerTool(tool);
   }, []);
 
+  const handleLocalSceneReady = useCallback(() => {
+    const currentLocalImport = getLocalStudyImport(studyId);
+
+    if (currentLocalImport?.status !== "LOCAL_ONLY") {
+      return;
+    }
+
+    requestAnimationFrame(() => {
+      const nextLocalImport = getLocalStudyImport(studyId);
+
+      if (nextLocalImport?.status === "LOCAL_ONLY") {
+        startLocalStudyBackendImport(nextLocalImport.id);
+      }
+    });
+  }, [studyId]);
+
   const handleViewerAction = useCallback((action: ViewerAction) => {
     if (action === "reset") {
       setActiveViewerTool("crosshair");
@@ -1207,10 +1226,6 @@ export default function Workspace() {
   useEffect(() => {
     if (!localImport) {
       return;
-    }
-
-    if (localImport.status === "LOCAL_ONLY") {
-      startLocalStudyBackendImport(localImport.id);
     }
 
     setWorkspace((currentWorkspace) => createLocalWorkspace(localImport, currentWorkspace));
@@ -1448,6 +1463,7 @@ export default function Workspace() {
           onAddMeasurement={addMeasurement}
           onActiveToolChange={handleActiveViewerToolChange}
           onMaskOverlayStatusChange={setMaskOverlayStatus}
+          onLocalSceneReady={handleLocalSceneReady}
           onSelectMeasurement={selectMeasurement}
           onPrepareVolume={handlePrepareVolume}
           onViewerModeChange={setViewerMode}

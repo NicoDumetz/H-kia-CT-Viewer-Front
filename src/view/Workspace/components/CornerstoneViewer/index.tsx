@@ -15,6 +15,8 @@
 //
 // =============================================================
 
+import { useEffect } from "react";
+
 import { CornerstoneStackViewer } from "../CornerstoneStackViewer";
 import { CornerstoneVolumeViewer } from "../CornerstoneVolumeViewer";
 import type { MaskLabelState } from "../MaskLabelsPanel";
@@ -107,6 +109,7 @@ type CornerstoneViewerProps = {
   onAddMeasurement?: (measurement: MedicalMeasurement) => void;
   onMaskOverlayStatusChange?: (status: MaskOverlayStatus) => void;
   onSelectMeasurement?: (measurementId: string | null) => void;
+  onSceneReady?: () => void;
   onViewerModeChange?: (mode: ViewerLayoutMode) => void;
   onWindowPresetChange?: (preset: WindowPresetId) => void;
   className?: string;
@@ -140,6 +143,7 @@ export function CornerstoneViewer({
   onAddMeasurement,
   onActiveToolChange,
   onMaskOverlayStatusChange,
+  onSceneReady,
   onSelectMeasurement,
   onViewerModeChange,
   onWindowPresetChange,
@@ -151,6 +155,22 @@ export function CornerstoneViewer({
   viewerMode,
   windowPreset,
 }: CornerstoneViewerProps) {
+  const usesVolumeViewer = Boolean(
+    source &&
+      (source.type === "nifti" ||
+        (source.type === "dicom" && source.imageIds.length > 1 && source.metadata)),
+  );
+
+  useEffect(() => {
+    if (!isReady || !source || usesVolumeViewer) {
+      return;
+    }
+
+    if (source.type === "dicom" && source.imageIds.length > 0) {
+      onSceneReady?.();
+    }
+  }, [isReady, onSceneReady, source, usesVolumeViewer]);
+
   if (!isReady || !source) {
     return (
       <div className={cn("flex h-full items-center justify-center bg-viewer", className)}>
@@ -161,7 +181,7 @@ export function CornerstoneViewer({
     );
   }
 
-  if (source.type === "nifti" || (source.type === "dicom" && source.imageIds.length > 1 && source.metadata)) {
+  if (usesVolumeViewer) {
     return (
       <CornerstoneVolumeViewer
         activeTool={activeTool}
@@ -176,6 +196,7 @@ export function CornerstoneViewer({
         onActiveToolChange={onActiveToolChange}
         onMaskOverlayStatusChange={onMaskOverlayStatusChange}
         onSelectMeasurement={onSelectMeasurement}
+        onSceneReady={onSceneReady}
         onViewerModeChange={onViewerModeChange}
         onWindowPresetChange={onWindowPresetChange}
         segmentationUrl={segmentationUrl}
@@ -186,6 +207,16 @@ export function CornerstoneViewer({
         viewerMode={viewerMode}
         windowPreset={windowPreset}
       />
+    );
+  }
+
+  if (source.type !== "dicom") {
+    return (
+      <div className={cn("flex h-full items-center justify-center bg-viewer", className)}>
+        <p className="max-w-md text-center text-sm text-text-muted">
+          {getMissingSourceMessage(isReady)}
+        </p>
+      </div>
     );
   }
 
