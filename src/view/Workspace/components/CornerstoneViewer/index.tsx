@@ -78,6 +78,7 @@ export type CornerstoneViewerSource =
       type: "dicom";
       imageIds: string[];
       emptyMessage?: string;
+      metadata?: VolumeMetadata;
     }
   | {
       type: "nifti";
@@ -160,7 +161,7 @@ export function CornerstoneViewer({
     );
   }
 
-  if (source.type === "nifti") {
+  if (source.type === "nifti" || (source.type === "dicom" && source.imageIds.length > 1 && source.metadata)) {
     return (
       <CornerstoneVolumeViewer
         activeTool={activeTool}

@@ -18,6 +18,7 @@
 import {
   cache,
   Enums,
+  imageLoader,
   RenderingEngine,
   setVolumesForViewports,
   utilities as cornerstoneUtilities,
@@ -73,7 +74,6 @@ import {
   calculateCircleRoiStats,
   getLengthMm,
   getPlaneRadiusMm,
-  getSliceIndexForVoxel,
   measurementPointToVoxel,
   toMeasurementPoint,
   voxelToMeasurementPoint,
@@ -88,6 +88,7 @@ type ViewerMode = ViewerLayoutMode;
 type VolumeLayout = Exclude<ViewerLayoutMode, "volume3d">;
 type MprViewportKey = Exclude<VolumeLayout, "mpr">;
 type CornerstoneToolGroup = NonNullable<ReturnType<typeof ToolGroupManager.getToolGroup>>;
+type VolumeViewerSource = Extract<CornerstoneViewerSource, { type: "nifti" | "dicom" }>;
 
 type WindowPreset = {
   id: WindowPresetId;
@@ -135,6 +136,16 @@ type MprState = {
   isDraggingCrosshair: boolean;
   sliceIndexByPlane: SliceIndexByPlane;
 };
+
+type RotationDeg = 0 | 90 | 180 | 270;
+
+type ViewportDisplayTransform = {
+  rotationDeg: RotationDeg;
+  flipH: boolean;
+  flipV: boolean;
+};
+
+type ViewportDisplayTransforms = Record<MprViewportKey, ViewportDisplayTransform>;
 
 type ViewportProbeState = {
   hu: number | null;
@@ -191,7 +202,7 @@ type MeasurementPointerData = {
 };
 
 type CornerstoneVolumeViewerProps = {
-  source: Extract<CornerstoneViewerSource, { type: "nifti" }>;
+  source: VolumeViewerSource;
   activeTool?: ViewerTool;
   actionRequest?: ViewerActionRequest | null;
   crosshairTarget?: ViewerCrosshairTarget | null;
@@ -227,8 +238,12 @@ type VolumeRenderingAreaProps = {
   maskOpacity: number;
   measurements: MedicalMeasurement[];
   selectedMeasurementId: string | null;
+  viewportDisplayTransforms: ViewportDisplayTransforms;
   onAddMeasurement?: (measurement: MedicalMeasurement) => void;
   onActiveToolChange?: (tool: ViewerTool) => void;
+  onResetAllViewportDisplayTransforms: () => void;
+  onResetViewportDisplayTransform: (viewportKey: MprViewportKey) => void;
+  onRotateViewport: (viewportKey: MprViewportKey, direction: "left" | "right") => void;
   onMaskOverlayStatusChange?: (status: MaskOverlayStatus) => void;
   onSelectMeasurement?: (measurementId: string | null) => void;
   onPresetChange: (preset: WindowPresetId) => void;
@@ -237,7 +252,7 @@ type VolumeRenderingAreaProps = {
   segmentationId: string;
   segmentationUrl?: string | null;
   segmentationVolumeId: string;
-  source: Extract<CornerstoneViewerSource, { type: "nifti" }>;
+  source: VolumeViewerSource;
   studyId?: string;
   toolGroupId: string;
   volumeId: string;
@@ -280,6 +295,74 @@ const toolNameByViewerTool: Partial<Record<ViewerTool, string>> = {
   zoom: ZoomTool.toolName,
 };
 
+function createDefaultViewportDisplayTransform(): ViewportDisplayTransform {
+  return {
+    flipH: false,
+    flipV: false,
+    rotationDeg: 0,
+  };
+}
+
+function createDefaultViewportDisplayTransforms(): ViewportDisplayTransforms {
+  return {
+    axial: createDefaultViewportDisplayTransform(),
+    coronal: createDefaultViewportDisplayTransform(),
+    sagittal: createDefaultViewportDisplayTransform(),
+  };
+}
+
+function normalizeRotationDeg(rotationDeg: number): RotationDeg {
+  const normalized = ((rotationDeg % 360) + 360) % 360;
+
+  if (normalized === 90 || normalized === 180 || normalized === 270) {
+    return normalized;
+  }
+
+  return 0;
+}
+
+function applyViewportDisplayTransform(
+  viewport: Types.IViewport | undefined,
+  transform: ViewportDisplayTransform,
+) {
+  const displayViewport = viewport as
+    | (Types.IViewport & {
+        getCamera?: () => {
+          flipHorizontal?: boolean;
+          flipVertical?: boolean;
+        };
+        setCamera?: (camera: {
+          flipHorizontal?: boolean;
+          flipVertical?: boolean;
+        }) => void;
+        setViewPresentation?: (presentation: {
+          flipHorizontal?: boolean;
+          flipVertical?: boolean;
+          rotation?: number;
+        }) => void;
+      })
+    | undefined;
+
+  if (!displayViewport) {
+    return;
+  }
+
+  try {
+    displayViewport.setViewPresentation?.({
+      flipHorizontal: transform.flipH,
+      flipVertical: transform.flipV,
+      rotation: transform.rotationDeg,
+    });
+  } catch {
+    displayViewport.setCamera?.({
+      flipHorizontal: transform.flipH,
+      flipVertical: transform.flipV,
+    });
+  }
+
+  displayViewport.render();
+}
+
 function getDisplayVoiRange(preset: WindowPreset) {
   const halfWidth = preset.width / 2;
 
@@ -312,8 +395,48 @@ function getViewportConfigs(baseViewportId: string): ViewportConfig[] {
   ];
 }
 
-function getSourceKey(source: Extract<CornerstoneViewerSource, { type: "nifti" }>) {
+function getSourceKey(source: VolumeViewerSource) {
+  if (source.type === "dicom") {
+    return `dicom-${source.imageIds.length}-${source.imageIds[0] || "empty"}`.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 120);
+  }
+
   return `nifti-${source.url}`.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 120);
+}
+
+async function createSourceImageIds(source: VolumeViewerSource) {
+  if (source.type === "dicom") {
+    return source.imageIds;
+  }
+
+  return createNiftiImageIds(source.url);
+}
+
+async function createSourceVolume(source: VolumeViewerSource, volumeId: string) {
+  const imageIds = await createSourceImageIds(source);
+
+  if (!imageIds.length) {
+    throw new Error(
+      source.type === "dicom"
+        ? "Aucune image DICOM exploitable pour Cornerstone3D."
+        : "Aucune image NIfTI exploitable pour Cornerstone3D.",
+    );
+  }
+
+  if (source.type === "dicom") {
+    await Promise.all(imageIds.map((imageId) => imageLoader.loadAndCacheImage(imageId)));
+
+    return volumeLoader.createAndCacheVolumeFromImagesSync(volumeId, imageIds);
+  }
+
+  return volumeLoader.createAndCacheVolume(volumeId, {
+    imageIds,
+  });
+}
+
+function releaseSourceResources(source: VolumeViewerSource) {
+  if (source.type === "nifti") {
+    releaseDecompressedNiftiUrl(source.url);
+  }
 }
 
 function getPreset(presetId: WindowPresetId) {
@@ -321,7 +444,7 @@ function getPreset(presetId: WindowPresetId) {
 }
 
 function getSliceTotal(
-  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+  source: VolumeViewerSource,
   viewportKey: MprViewportKey,
 ) {
   const shape = source.metadata?.shape || [];
@@ -334,7 +457,7 @@ function getSliceTotal(
   return Math.max(1, totalByViewport[viewportKey]);
 }
 
-function getInitialSliceIndices(source: Extract<CornerstoneViewerSource, { type: "nifti" }>) {
+function getInitialSliceIndices(source: VolumeViewerSource) {
   return {
     axial: Math.floor(getSliceTotal(source, "axial") / 2),
     coronal: Math.floor(getSliceTotal(source, "coronal") / 2),
@@ -342,7 +465,7 @@ function getInitialSliceIndices(source: Extract<CornerstoneViewerSource, { type:
   };
 }
 
-function getVolumeShape(source: Extract<CornerstoneViewerSource, { type: "nifti" }>) {
+function getVolumeShape(source: VolumeViewerSource) {
   const shape = source.metadata?.shape || [];
 
   return {
@@ -370,7 +493,7 @@ function getSliceIndicesFromVoxel(voxel: VoxelPoint): SliceIndexByPlane {
 
 function clampVoxelPoint(
   voxel: VoxelPoint,
-  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+  source: VolumeViewerSource,
 ): VoxelPoint {
   const shape = getVolumeShape(source);
 
@@ -382,7 +505,7 @@ function clampVoxelPoint(
 }
 
 function createInitialMprState(
-  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+  source: VolumeViewerSource,
 ): MprState {
   const sliceIndexByPlane = getInitialSliceIndices(source);
 
@@ -399,7 +522,7 @@ function clampSliceIndex(value: number, total: number) {
 }
 
 function getViewportDimensions(
-  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+  source: VolumeViewerSource,
   viewportKey: MprViewportKey,
 ) {
   const shape = source.metadata?.shape || [];
@@ -439,7 +562,7 @@ function formatWorld(world: number[] | null) {
   return `${formatNumber(world[0])}, ${formatNumber(world[1])}, ${formatNumber(world[2])}`;
 }
 
-function formatSpacing(source: Extract<CornerstoneViewerSource, { type: "nifti" }>) {
+function formatSpacing(source: VolumeViewerSource) {
   const spacing = source.metadata?.spacing;
 
   if (!spacing?.length) {
@@ -460,14 +583,14 @@ function getPresetOverlayLabel(presetId: WindowPresetId) {
 
 function getClinicalHuValue(
   value: number,
-  _source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+  _source: VolumeViewerSource,
 ) {
   return value;
 }
 
 function readVoxelClinicalValue(
   voxel: VoxelPoint,
-  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+  source: VolumeViewerSource,
   volumeId: string,
 ) {
   const volume = cache.getVolume(volumeId);
@@ -496,7 +619,7 @@ function readVoxelClinicalValue(
 
 function readVoxelHu(
   voxel: VoxelPoint,
-  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+  source: VolumeViewerSource,
   volumeId: string,
 ) {
   const value = readVoxelClinicalValue(voxel, source, volumeId);
@@ -524,7 +647,7 @@ function getOrientationLabels(viewportKey: MprViewportKey): OrientationLabelSet 
 
 function getVoxelCrosshairPosition(
   voxel: VoxelPoint,
-  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+  source: VolumeViewerSource,
   viewportKey: MprViewportKey,
 ): CrosshairPosition {
   const shape = getVolumeShape(source);
@@ -549,7 +672,7 @@ function getVoxelCrosshairPosition(
   };
 }
 
-function getFallbackAffine(source: Extract<CornerstoneViewerSource, { type: "nifti" }>) {
+function getFallbackAffine(source: VolumeViewerSource) {
   const origin = source.metadata?.origin || [0, 0, 0];
   const spacing = source.metadata?.spacing || [1, 1, 1];
   const direction = source.metadata?.direction || [1, 0, 0, 0, 1, 0, 0, 0, 1];
@@ -576,7 +699,7 @@ function getFallbackAffine(source: Extract<CornerstoneViewerSource, { type: "nif
   ];
 }
 
-function getVolumeAffine(source: Extract<CornerstoneViewerSource, { type: "nifti" }>) {
+function getVolumeAffine(source: VolumeViewerSource) {
   const affine = source.metadata?.affine;
 
   if (
@@ -619,7 +742,7 @@ function invert3x3(matrix: number[][]) {
 
 function voxelToWorld(
   voxel: VoxelPoint,
-  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+  source: VolumeViewerSource,
 ): Types.Point3 {
   const affine = getVolumeAffine(source);
   const values = [voxel.i, voxel.j, voxel.k];
@@ -636,9 +759,32 @@ function voxelToWorld(
   }) as Types.Point3;
 }
 
+function voxelToWorldFromVolume(
+  voxel: VoxelPoint,
+  source: VolumeViewerSource,
+  volumeId: string,
+): Types.Point3 {
+  const volume = cache.getVolume(volumeId);
+  const imageData = volume?.imageData as
+    | {
+        indexToWorld?: (voxelPos: Types.Point3) => Types.Point3;
+      }
+    | undefined;
+
+  if (imageData?.indexToWorld) {
+    try {
+      return imageData.indexToWorld([voxel.i, voxel.j, voxel.k]);
+    } catch {
+      // Fallback to metadata affine below.
+    }
+  }
+
+  return voxelToWorld(voxel, source);
+}
+
 function worldToVoxel(
   world: number[],
-  source: Extract<CornerstoneViewerSource, { type: "nifti" }>,
+  source: VolumeViewerSource,
 ): VoxelPoint | null {
   const affine = getVolumeAffine(source);
   const inverse = invert3x3([
@@ -662,6 +808,39 @@ function worldToVoxel(
     j: inverse[1][0] * translated[0] + inverse[1][1] * translated[1] + inverse[1][2] * translated[2],
     k: inverse[2][0] * translated[0] + inverse[2][1] * translated[1] + inverse[2][2] * translated[2],
   };
+}
+
+function worldToVoxelFromVolume(
+  world: number[] | null,
+  source: VolumeViewerSource,
+  volumeId: string,
+): VoxelPoint | null {
+  if (!world || world.length < 3) {
+    return null;
+  }
+
+  const volume = cache.getVolume(volumeId);
+  const imageData = volume?.imageData as
+    | {
+        worldToIndex?: (worldPos: Types.Point3) => Types.Point3;
+      }
+    | undefined;
+
+  if (imageData?.worldToIndex) {
+    try {
+      const voxel = imageData.worldToIndex([world[0], world[1], world[2]]);
+
+      return {
+        i: voxel[0],
+        j: voxel[1],
+        k: voxel[2],
+      };
+    } catch {
+      // Fallback to metadata affine below.
+    }
+  }
+
+  return worldToVoxel(world, source);
 }
 
 function applyWindowPreset(
@@ -1074,7 +1253,7 @@ function disposeStudyResources({
   segmentationId,
   segmentationVolumeId,
   segmentationUrl,
-  sourceUrl,
+  source,
   toolGroupId,
   volumeId,
 }: {
@@ -1082,7 +1261,7 @@ function disposeStudyResources({
   segmentationId: string;
   segmentationVolumeId: string;
   segmentationUrl?: string | null;
-  sourceUrl: string;
+  source: VolumeViewerSource;
   toolGroupId: string;
   volumeId: string;
 }) {
@@ -1102,7 +1281,7 @@ function disposeStudyResources({
 
   removeCachedVolumeQuietly(segmentationVolumeId);
   removeCachedVolumeQuietly(volumeId);
-  releaseDecompressedNiftiUrl(sourceUrl);
+  releaseSourceResources(source);
 
   if (segmentationUrl) {
     releaseDecompressedNiftiUrl(segmentationUrl);
@@ -1244,6 +1423,65 @@ function ViewportInfoOverlay({
   );
 }
 
+function DisplayControlButton({
+  children,
+  label,
+  onClick,
+}: {
+  children: string;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      aria-label={label}
+      className="pointer-events-auto h-6 rounded border border-border-soft bg-black/70 px-1.5 text-[10px] font-semibold text-text-soft hover:border-primary/70 hover:text-text"
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onClick();
+      }}
+      onPointerDown={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+      title={label}
+      type="button"
+    >
+      {children}
+    </button>
+  );
+}
+
+function ViewportDisplayControls({
+  onReset,
+  onRotateLeft,
+  onRotateRight,
+  transform,
+}: {
+  onReset: () => void;
+  onRotateLeft: () => void;
+  onRotateRight: () => void;
+  transform: ViewportDisplayTransform;
+}) {
+  return (
+    <div className="absolute right-2 top-2 z-30 flex items-center gap-1">
+      <span className="pointer-events-none rounded bg-black/70 px-1.5 py-1 text-[10px] font-semibold text-text-muted">
+        {transform.rotationDeg}
+      </span>
+      <DisplayControlButton label="Rotate left 90 degrees" onClick={onRotateLeft}>
+        L90
+      </DisplayControlButton>
+      <DisplayControlButton label="Rotate right 90 degrees" onClick={onRotateRight}>
+        R90
+      </DisplayControlButton>
+      <DisplayControlButton label="Reset rotation" onClick={onReset}>
+        0
+      </DisplayControlButton>
+    </div>
+  );
+}
+
 function VolumeRenderingArea({
   actionRequest,
   activePreset,
@@ -1258,7 +1496,10 @@ function VolumeRenderingArea({
   measurements,
   onAddMeasurement,
   onActiveToolChange,
+  onResetAllViewportDisplayTransforms,
+  onResetViewportDisplayTransform,
   onMaskOverlayStatusChange,
+  onRotateViewport,
   onSelectMeasurement,
   onPresetChange,
   onViewportDoubleClick,
@@ -1270,6 +1511,7 @@ function VolumeRenderingArea({
   source,
   studyId,
   toolGroupId,
+  viewportDisplayTransforms,
   volumeId,
 }: VolumeRenderingAreaProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -1279,6 +1521,7 @@ function VolumeRenderingArea({
   const setupTokenRef = useRef(0);
   const viewportsRef = useRef<Types.IViewport[]>([]);
   const viewportsByIdRef = useRef<Record<string, Types.IViewport | undefined>>({});
+  const requestedSliceByViewportIdRef = useRef<Record<string, number>>({});
   const isRenderingReadyRef = useRef(false);
   const isMaskVisibleRef = useRef(isMaskVisible);
   const isMaskOverlayLoadedRef = useRef(false);
@@ -1323,8 +1566,8 @@ function VolumeRenderingArea({
   );
   const sliceIndices = mprState.sliceIndexByPlane;
   const crosshairWorld = useMemo(
-    () => voxelToWorld(mprState.crosshairVoxel, source),
-    [mprState.crosshairVoxel, source],
+    () => voxelToWorldFromVolume(mprState.crosshairVoxel, source, volumeId),
+    [mprState.crosshairVoxel, source, volumeId],
   );
 
   const clearMeasurementDrafts = useCallback(() => {
@@ -1369,38 +1612,69 @@ function VolumeRenderingArea({
     }
   }, []);
 
+  const applyViewportDisplayTransforms = useCallback(() => {
+    viewportConfigs.forEach((config) => {
+      applyViewportDisplayTransform(
+        viewportsByIdRef.current[config.id],
+        viewportDisplayTransforms[config.key],
+      );
+    });
+    renderingEngineRef.current?.renderViewports(viewportIds);
+  }, [viewportConfigs, viewportDisplayTransforms, viewportIds]);
+
+  const jumpViewportToSlice = useCallback(
+    (viewportId: string, imageIndex: number) => {
+      const element = viewportElementsRef.current[viewportId];
+
+      if (!element) {
+        return;
+      }
+
+      requestedSliceByViewportIdRef.current[viewportId] = imageIndex;
+
+      void cornerstoneUtilities
+        .jumpToSlice(element, {
+          debounceLoading: false,
+          imageIndex,
+          volumeId,
+        })
+        .then(() => {
+          const latestImageIndex = requestedSliceByViewportIdRef.current[viewportId];
+
+          if (latestImageIndex !== imageIndex) {
+            jumpViewportToSlice(viewportId, latestImageIndex);
+            return;
+          }
+
+          viewportsByIdRef.current[viewportId]?.render();
+        })
+        .catch((syncError) => {
+          if (import.meta.env.DEV) {
+            console.warn("[Cornerstone MPR sync]", syncError);
+          }
+        });
+    },
+    [volumeId],
+  );
+
   const syncMprViewportsToCrosshair = useCallback(
-    (sliceIndexByPlane: SliceIndexByPlane) => {
+    (sliceIndexByPlane: SliceIndexByPlane, skipViewportId?: string) => {
       if (!isRenderingReadyRef.current) {
         return;
       }
 
       viewportConfigs.forEach((config) => {
-        const element = viewportElementsRef.current[config.id];
-
-        if (!element) {
+        if (config.id === skipViewportId) {
+          viewportsByIdRef.current[config.id]?.render();
           return;
         }
 
-        void cornerstoneUtilities
-          .jumpToSlice(element, {
-            debounceLoading: true,
-            imageIndex: sliceIndexByPlane[config.key],
-            volumeId,
-          })
-          .then(() => {
-            viewportsByIdRef.current[config.id]?.render();
-          })
-          .catch((syncError) => {
-            if (import.meta.env.DEV) {
-              console.warn("[Cornerstone MPR sync]", syncError);
-            }
-          });
+        jumpViewportToSlice(config.id, sliceIndexByPlane[config.key]);
       });
 
       renderingEngineRef.current?.renderViewports(viewportIds);
     },
-    [viewportConfigs, viewportIds, volumeId],
+    [jumpViewportToSlice, viewportConfigs, viewportIds],
   );
 
   const applyMprVoxel = useCallback(
@@ -1420,25 +1694,85 @@ function VolumeRenderingArea({
     [clearMeasurementDrafts, source, syncMprViewportsToCrosshair],
   );
 
+  const applyCrosshairVoxelFromViewport = useCallback(
+    (voxel: VoxelPoint, viewportId: string) => {
+      const viewportKey = getPlaneByViewportId(viewportId, viewportConfigs);
+
+      if (!viewportKey) {
+        return;
+      }
+
+      const currentSlices = mprState.sliceIndexByPlane;
+      const nextVoxel = clampVoxelPoint(
+        {
+          ...voxel,
+          ...(viewportKey === "axial" ? { k: currentSlices.axial } : {}),
+          ...(viewportKey === "sagittal" ? { i: currentSlices.sagittal } : {}),
+          ...(viewportKey === "coronal" ? { j: currentSlices.coronal } : {}),
+        },
+        source,
+      );
+      const nextSliceIndexByPlane = {
+        ...getSliceIndicesFromVoxel(nextVoxel),
+        [viewportKey]: currentSlices[viewportKey],
+      };
+
+      setMprState((currentState) => ({
+        ...currentState,
+        crosshairVoxel: nextVoxel,
+        sliceIndexByPlane: nextSliceIndexByPlane,
+      }));
+      syncMprViewportsToCrosshair(nextSliceIndexByPlane, viewportId);
+      clearMeasurementDrafts();
+      setToolMessage(null);
+    },
+    [
+      clearMeasurementDrafts,
+      mprState.sliceIndexByPlane,
+      source,
+      syncMprViewportsToCrosshair,
+      viewportConfigs,
+    ],
+  );
+
+  const lockVoxelToViewportSlice = useCallback(
+    (voxel: VoxelPoint, viewportKey: MprViewportKey) => {
+      return clampVoxelPoint(
+        {
+          ...voxel,
+          ...(viewportKey === "axial" ? { k: mprState.sliceIndexByPlane.axial } : {}),
+          ...(viewportKey === "sagittal" ? { i: mprState.sliceIndexByPlane.sagittal } : {}),
+          ...(viewportKey === "coronal" ? { j: mprState.sliceIndexByPlane.coronal } : {}),
+        },
+        source,
+      );
+    },
+    [mprState.sliceIndexByPlane, source],
+  );
+
   const getViewportClickVoxel = useCallback(
     (event: PointerEvent<HTMLElement>, viewportId: string): VoxelPoint | null => {
       const point = getCanvasPointerPosition(event, viewportElementsRef.current[viewportId]);
+      const viewportKey = getPlaneByViewportId(viewportId, viewportConfigs);
       const viewport =
         viewportsByIdRef.current[viewportId] || renderingEngineRef.current?.getViewport(viewportId);
 
+      if (!viewportKey) {
+        return null;
+      }
+
       if (point) {
         const worldPoint = getWorldPoint(viewport, point);
-        const voxelPoint = worldPoint ? worldToVoxel(worldPoint, source) : null;
+        const voxelPoint = worldToVoxelFromVolume(worldPoint, source, volumeId);
 
         if (voxelPoint) {
-          return clampVoxelPoint(voxelPoint, source);
+          return lockVoxelToViewportSlice(voxelPoint, viewportKey);
         }
       }
 
       const position = getRelativePointerPosition(event, viewportElementsRef.current[viewportId]);
-      const viewportKey = getPlaneByViewportId(viewportId, viewportConfigs);
 
-      if (!position || !viewportKey) {
+      if (!position) {
         return null;
       }
 
@@ -1476,7 +1810,13 @@ function VolumeRenderingArea({
         source,
       );
     },
-    [mprState.crosshairVoxel, source, viewportConfigs],
+    [
+      lockVoxelToViewportSlice,
+      mprState.crosshairVoxel,
+      source,
+      viewportConfigs,
+      volumeId,
+    ],
   );
 
   const getViewportProbe = useCallback(
@@ -1490,9 +1830,10 @@ function VolumeRenderingArea({
       }
 
       const world = getWorldPoint(viewport, point);
-      const voxel = world ? worldToVoxel(world, source) : null;
+      const voxel = worldToVoxelFromVolume(world, source, volumeId);
+      const viewportKey = getPlaneByViewportId(viewportId, viewportConfigs);
 
-      if (!voxel) {
+      if (!voxel || !viewportKey) {
         return {
           hu: null,
           voxel: null,
@@ -1500,15 +1841,16 @@ function VolumeRenderingArea({
         };
       }
 
-      const clampedVoxel = clampVoxelPoint(voxel, source);
+      const clampedVoxel = lockVoxelToViewportSlice(voxel, viewportKey);
+      const clampedWorld = voxelToWorldFromVolume(clampedVoxel, source, volumeId);
 
       return {
         hu: readVoxelHu(clampedVoxel, source, volumeId),
         voxel: clampedVoxel,
-        world,
+        world: clampedWorld,
       };
     },
-    [source, volumeId],
+    [lockVoxelToViewportSlice, source, viewportConfigs, volumeId],
   );
 
   const updateViewportProbe = useCallback(
@@ -1544,25 +1886,26 @@ function VolumeRenderingArea({
         return null;
       }
 
-      const voxel = worldToVoxel(world, source);
+      const voxel = worldToVoxelFromVolume(world, source, volumeId);
 
       if (!voxel) {
         setToolMessage("Coordonnées voxel indisponibles pour cette mesure.");
         return null;
       }
 
-      const clampedVoxel = clampVoxelPoint(voxel, source);
+      const clampedVoxel = lockVoxelToViewportSlice(voxel, plane);
+      const clampedWorld = voxelToWorldFromVolume(clampedVoxel, source, volumeId);
 
       return {
         plane,
         pointCanvas: point,
-        sliceIndex: getSliceIndexForVoxel(clampedVoxel, plane),
+        sliceIndex: mprState.sliceIndexByPlane[plane],
         voxel: clampedVoxel,
         voxelPoint: voxelToMeasurementPoint(clampedVoxel),
-        world: toMeasurementPoint(world),
+        world: toMeasurementPoint(clampedWorld),
       };
     },
-    [source, viewportConfigs],
+    [lockVoxelToViewportSlice, mprState.sliceIndexByPlane, source, viewportConfigs, volumeId],
   );
 
   const setSliceForViewport = useCallback(
@@ -1641,9 +1984,15 @@ function VolumeRenderingArea({
       }
 
       setActiveViewport(viewportId);
-      applyMprVoxel(voxel);
+      applyCrosshairVoxelFromViewport(voxel, viewportId);
     },
-    [applyMprVoxel, getViewportClickVoxel, isLoading, isSceneReady, setActiveViewport],
+    [
+      applyCrosshairVoxelFromViewport,
+      getViewportClickVoxel,
+      isLoading,
+      isSceneReady,
+      setActiveViewport,
+    ],
   );
 
   const getLengthMeasurementData = useCallback(
@@ -2032,6 +2381,10 @@ function VolumeRenderingArea({
 
       event.preventDefault();
       event.stopPropagation();
+      setMprState((currentState) => ({
+        ...currentState,
+        isDraggingCrosshair: true,
+      }));
       updateCrosshairPositionFromEvent(event, viewportId);
     },
     [
@@ -2055,14 +2408,16 @@ function VolumeRenderingArea({
         return;
       }
 
-      // TODO: re-enable drag crosshair once Cornerstone slice sync is debounced
-      // enough for continuous updates. Safe mode keeps crosshair click-to-center.
-      setMprState((currentState) => ({
-        ...currentState,
-        isDraggingCrosshair: false,
-      }));
+      event.preventDefault();
+      event.stopPropagation();
+      updateCrosshairPositionFromEvent(event, viewportId);
     },
-    [activeTool, handleMeasurementPointerMove, updateViewportProbe],
+    [
+      activeTool,
+      handleMeasurementPointerMove,
+      updateCrosshairPositionFromEvent,
+      updateViewportProbe,
+    ],
   );
 
   const handleViewportPointerUp = useCallback(
@@ -2111,6 +2466,7 @@ function VolumeRenderingArea({
 
     const initialMprState = createInitialMprState(source);
 
+    applyViewportDisplayTransforms();
     setMprState(initialMprState);
     syncMprViewportsToCrosshair(initialMprState.sliceIndexByPlane);
     clearMeasurementDrafts();
@@ -2121,6 +2477,7 @@ function VolumeRenderingArea({
     clearMeasurementDrafts,
     onActiveToolChange,
     onPresetChange,
+    applyViewportDisplayTransforms,
     source,
     syncMprViewportsToCrosshair,
   ]);
@@ -2181,6 +2538,14 @@ function VolumeRenderingArea({
   }, [activePreset]);
 
   useEffect(() => {
+    if (!isRenderingReadyRef.current) {
+      return;
+    }
+
+    applyViewportDisplayTransforms();
+  }, [applyViewportDisplayTransforms]);
+
+  useEffect(() => {
     const initialMprState = createInitialMprState(source);
 
     setMprState(initialMprState);
@@ -2238,7 +2603,7 @@ function VolumeRenderingArea({
     }
 
     if (crosshairTarget.world?.length && crosshairTarget.world.length >= 3) {
-      const voxel = worldToVoxel(crosshairTarget.world, source);
+      const voxel = worldToVoxelFromVolume(crosshairTarget.world, source, volumeId);
 
       if (voxel) {
         applyMprVoxel(voxel);
@@ -2272,7 +2637,7 @@ function VolumeRenderingArea({
       j: clamp(crosshairTarget.y) * (shape.j - 1),
       k: mprState.crosshairVoxel.k,
     });
-  }, [applyMprVoxel, crosshairTarget, mprState.crosshairVoxel.k, sliceIndices, source]);
+  }, [applyMprVoxel, crosshairTarget, mprState.crosshairVoxel.k, sliceIndices, source, volumeId]);
 
   useEffect(() => {
     const nextViewportId = getLayoutViewportId(layout, viewportConfigs);
@@ -2433,16 +2798,6 @@ function VolumeRenderingArea({
           return;
         }
 
-        const imageIds = await createNiftiImageIds(source.url);
-
-        if (isCancelled || setupToken !== setupTokenRef.current) {
-          return;
-        }
-
-        if (!imageIds.length) {
-          throw new Error("Aucune image NIfTI exploitable pour Cornerstone3D.");
-        }
-
         if (viewportInputs.length !== viewportConfigs.length) {
           throw new Error("Aucun viewport disponible pour Cornerstone3D.");
         }
@@ -2477,9 +2832,7 @@ function VolumeRenderingArea({
           setPrimaryTool(toolGroup, "window");
         }
 
-        const volume = await volumeLoader.createAndCacheVolume(volumeId, {
-          imageIds,
-        });
+        const volume = await createSourceVolume(source, volumeId);
 
         await volume.load();
 
@@ -2489,7 +2842,7 @@ function VolumeRenderingArea({
             segmentationId,
             segmentationVolumeId,
             segmentationUrl: null,
-            sourceUrl: source.url,
+            source,
             toolGroupId,
             volumeId,
           });
@@ -2520,6 +2873,12 @@ function VolumeRenderingArea({
         viewportInputs.forEach((input) => resizeObserver.observe(input.element));
 
         applyWindowPreset(nextViewports, activePresetRef.current);
+        viewportConfigs.forEach((config) => {
+          applyViewportDisplayTransform(
+            nextViewports[viewportIds.indexOf(config.id)],
+            viewportDisplayTransforms[config.key],
+          );
+        });
         renderingEngine.resize(true, false);
         renderingEngine.renderViewports(viewportIds);
 
@@ -2537,7 +2896,7 @@ function VolumeRenderingArea({
           segmentationId,
           segmentationVolumeId,
           segmentationUrl: null,
-          sourceUrl: source.url,
+          source,
           toolGroupId,
           volumeId,
         });
@@ -2574,7 +2933,7 @@ function VolumeRenderingArea({
         segmentationId,
         segmentationVolumeId,
         segmentationUrl: null,
-        sourceUrl: source.url,
+        source,
         toolGroupId,
         volumeId,
       });
@@ -2587,7 +2946,7 @@ function VolumeRenderingArea({
     renderingEngineId,
     segmentationId,
     segmentationVolumeId,
-    source.url,
+    source,
     toolGroupId,
     updateMaskOverlayStatus,
     viewportConfigs,
@@ -2935,6 +3294,14 @@ function VolumeRenderingArea({
             ref={(element) => setViewportElement(config.id, element)}
           />
           {!shouldShowLoading ? (
+            <ViewportDisplayControls
+              onReset={() => onResetViewportDisplayTransform(config.key)}
+              onRotateLeft={() => onRotateViewport(config.key, "left")}
+              onRotateRight={() => onRotateViewport(config.key, "right")}
+              transform={viewportDisplayTransforms[config.key]}
+            />
+          ) : null}
+          {!shouldShowLoading ? (
             <>
               <ViewportInfoOverlay
                 dimensions={getViewportDimensions(source, config.key)}
@@ -2979,6 +3346,17 @@ function VolumeRenderingArea({
           </ViewportFrame>
         );
       })}
+
+      {!shouldShowLoading && !error ? (
+        <div className="absolute bottom-4 left-4 z-30">
+          <DisplayControlButton
+            label="Reset all orientations"
+            onClick={onResetAllViewportDisplayTransforms}
+          >
+            Reset all
+          </DisplayControlButton>
+        </div>
+      ) : null}
 
       {!shouldShowLoading && !error && activeScrollerViewportId ? (
         <div className="absolute bottom-4 right-4 top-16 z-30">
@@ -3062,6 +3440,9 @@ export function CornerstoneVolumeViewer({
   const [internalViewerMode, setInternalViewerMode] = useState<ViewerMode>("mpr");
   const [internalPreset, setInternalPreset] = useState<WindowPresetId>("soft");
   const [clearTemporaryKey, setClearTemporaryKey] = useState(0);
+  const [viewportDisplayTransforms, setViewportDisplayTransforms] = useState(
+    createDefaultViewportDisplayTransforms,
+  );
   const activeViewerMode = viewerMode || internalViewerMode;
   const activePreset = windowPreset || internalPreset;
   const renderingEngineId = `hekia-volume-rendering-engine-${reactId}-${sourceKey}`;
@@ -3089,10 +3470,40 @@ export function CornerstoneVolumeViewer({
     onWindowPresetChange?.(nextPreset);
   };
 
+  const handleRotateViewport = (
+    viewportKey: MprViewportKey,
+    direction: "left" | "right",
+  ) => {
+    setViewportDisplayTransforms((currentTransforms) => ({
+      ...currentTransforms,
+      [viewportKey]: {
+        ...currentTransforms[viewportKey],
+        rotationDeg: normalizeRotationDeg(
+          currentTransforms[viewportKey].rotationDeg + (direction === "left" ? -90 : 90),
+        ),
+      },
+    }));
+  };
+
+  const handleResetViewportDisplayTransform = (viewportKey: MprViewportKey) => {
+    setViewportDisplayTransforms((currentTransforms) => ({
+      ...currentTransforms,
+      [viewportKey]: createDefaultViewportDisplayTransform(),
+    }));
+  };
+
+  const handleResetAllViewportDisplayTransforms = () => {
+    setViewportDisplayTransforms(createDefaultViewportDisplayTransforms());
+  };
+
   const handleBackToMpr = () => {
     handleViewerModeChange("mpr");
     onActiveToolChange?.("crosshair");
   };
+
+  useEffect(() => {
+    setViewportDisplayTransforms(createDefaultViewportDisplayTransforms());
+  }, [sourceKey]);
 
   return (
     <div className={cn("flex h-full flex-col bg-viewer", className)}>
@@ -3150,6 +3561,9 @@ export function CornerstoneVolumeViewer({
             onAddMeasurement={onAddMeasurement}
             onActiveToolChange={onActiveToolChange}
             onMaskOverlayStatusChange={onMaskOverlayStatusChange}
+            onResetAllViewportDisplayTransforms={handleResetAllViewportDisplayTransforms}
+            onResetViewportDisplayTransform={handleResetViewportDisplayTransform}
+            onRotateViewport={handleRotateViewport}
             onSelectMeasurement={onSelectMeasurement}
             onPresetChange={handleWindowPresetChange}
             onViewportDoubleClick={(viewportKey) => {
@@ -3163,17 +3577,26 @@ export function CornerstoneVolumeViewer({
             source={source}
             studyId={studyId}
             toolGroupId={toolGroupId}
+            viewportDisplayTransforms={viewportDisplayTransforms}
             volumeId={volumeId}
           />
         </ViewportGrid>
 
-        {activeViewerMode === "volume3d" ? (
+        {activeViewerMode === "volume3d" && source.type === "nifti" ? (
           <div className="absolute inset-0">
             <VTKVolume3DViewer
               className="h-full w-full"
               onBackToMpr={handleBackToMpr}
               source={source}
             />
+          </div>
+        ) : null}
+
+        {activeViewerMode === "volume3d" && source.type === "dicom" ? (
+          <div className="absolute inset-0 flex items-center justify-center bg-viewer">
+            <div className="rounded border border-border-soft bg-surface px-4 py-3 text-sm text-text-muted">
+              Vue 3D disponible après préparation backend NIfTI. Les vues MPR locales restent actives.
+            </div>
           </div>
         ) : null}
       </div>

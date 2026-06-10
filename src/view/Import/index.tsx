@@ -20,6 +20,11 @@ import { useNavigate } from "react-router-dom";
 
 import { Studies } from "~/api";
 import { Badge } from "~/components";
+import { buildLocalDicomStudy } from "~/helpers/LocalDicom";
+import {
+  createLocalStudyImport,
+  startLocalStudyBackendImport,
+} from "~/helpers/LocalStudyImport";
 import { ImportPanel } from "./components";
 
 function getRecord(value: unknown): Record<string, unknown> | null {
@@ -62,6 +67,20 @@ function getStudyIdFromUploadResponse(data: unknown): string | null {
   return null;
 }
 
+function isNiftiFile(file: File) {
+  const filename = file.name.toLowerCase();
+
+  return filename.endsWith(".nii") || filename.endsWith(".nii.gz");
+}
+
+function isZipFile(file: File) {
+  return file.name.toLowerCase().endsWith(".zip");
+}
+
+function shouldUseBackendFirstImport(files: File[]) {
+  return files.length === 1 && (isNiftiFile(files[0]) || isZipFile(files[0]));
+}
+
 export default function Import() {
   const navigate = useNavigate();
   const [files, setFiles] = useState<File[]>([]);
@@ -83,6 +102,15 @@ export default function Import() {
     setIsImporting(true);
 
     try {
+      if (!shouldUseBackendFirstImport(files)) {
+        const localDicom = await buildLocalDicomStudy(files);
+        const localStudy = createLocalStudyImport(files, localDicom);
+
+        startLocalStudyBackendImport(localStudy.id);
+        navigate(`/studies/${encodeURIComponent(localStudy.id)}/workspace`);
+        return;
+      }
+
       const response = await Studies.uploadStudy(files);
       const studyId = getStudyIdFromUploadResponse(response.data);
 
@@ -107,7 +135,7 @@ export default function Import() {
             Import
           </Badge>
         </div>
-        <span className="text-xs text-text-muted">Volume canonique backend</span>
+        <span className="text-xs text-text-muted">DICOM local-first</span>
       </header>
 
       <section className="grid min-h-0 flex-1 grid-cols-1 gap-4 p-4 lg:grid-cols-[minmax(0,44rem)_minmax(18rem,1fr)]">
@@ -125,10 +153,10 @@ export default function Import() {
               Flux cible
             </p>
             <div className="mt-3 space-y-2 text-xs leading-relaxed text-text-soft">
-              <p>1. Upload NIfTI, DICOM, DICOMDIR ou zip DICOM.</p>
-              <p>2. Préparation backend vers derived/volume/ct.nii.gz.</p>
-              <p>3. Ouverture du workspace sur /viewer et /volume.</p>
-              <p>4. Le rendu principal utilise le volume préparé, pas la stack brute.</p>
+              <p>1. Lecture locale des fichiers DICOM dans le navigateur.</p>
+              <p>2. Ouverture immédiate du viewer sur la stack locale triée.</p>
+              <p>3. Upload backend en arrière-plan pour générer ct.nii.gz.</p>
+              <p>4. Activation IA quand la study backend est prête.</p>
             </div>
           </div>
 

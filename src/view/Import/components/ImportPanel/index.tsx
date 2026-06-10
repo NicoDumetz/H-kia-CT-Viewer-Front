@@ -89,10 +89,10 @@ function getHint(mode: ImportMode) {
   }
 
   if (mode === "nifti") {
-    return "Le volume NIfTI sera préparé comme volume canonique backend.";
+    return "Le NIfTI est importé directement côté backend.";
   }
 
-  return "Sélectionnez le dossier ou les fichiers DICOM de la série CT.";
+  return "Sélectionnez le dossier ou les fichiers DICOM. Le viewer s'ouvrira depuis les fichiers locaux.";
 }
 
 function getAccept(mode: ImportMode) {
@@ -124,7 +124,7 @@ export function ImportPanel({
       <div className="border-b border-border-soft px-4 py-3">
         <h1 className="text-base font-extrabold text-text">Importer un examen</h1>
         <p className="mt-1 text-xs leading-relaxed text-text-muted">
-          Le viewer ouvrira le volume préparé backend après import.
+          Les DICOM locaux s'affichent immédiatement, l'IA arrive après préparation backend.
         </p>
       </div>
 
@@ -189,7 +189,7 @@ export function ImportPanel({
 
         {isImporting ? (
           <div className="mt-4">
-            <LoadingState label="Transfert et préparation de l'examen..." />
+            <LoadingState label="Lecture locale de l'examen..." />
           </div>
         ) : null}
       </div>
@@ -203,7 +203,7 @@ export function ImportPanel({
           onClick={onImport}
           variant="primary"
         >
-          {isImporting ? "Importation..." : "Ouvrir le viewer"}
+          {isImporting ? "Lecture..." : "Ouvrir le viewer"}
         </Button>
       </div>
     </section>

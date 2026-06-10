@@ -31,6 +31,12 @@ import {
   TopToolBar,
   ViewerShell,
 } from "./components";
+import type { LocalStudyImport } from "~/helpers/LocalStudyImport";
+import {
+  getLocalStudyImport,
+  startLocalStudyBackendImport,
+  subscribeLocalStudyImports,
+} from "~/helpers/LocalStudyImport";
 import type {
   CornerstoneViewerSource,
   MaskLabelState,
@@ -63,6 +69,10 @@ function wait(ms: number) {
   return new Promise<void>((resolve) => {
     window.setTimeout(resolve, ms);
   });
+}
+
+function isLocalStudyId(studyId: string | undefined) {
+  return Boolean(studyId?.startsWith("local-"));
 }
 
 async function waitForAiRunCompletion({
@@ -257,13 +267,109 @@ function getFallbackDicomSeries(viewer: StudyViewerResponse | null) {
 
 function getCornerstoneSource({
   allowDicomFallback = false,
+  localImport,
   viewer,
   volume,
 }: {
   viewer: StudyViewerResponse | null;
   volume: StudyVolumeResponse | null;
   allowDicomFallback?: boolean;
+  localImport?: LocalStudyImport | null;
 }): CornerstoneViewerSource | null {
+  if (localImport) {
+    const series = localImport.localDicom.selectedSeries;
+    const firstImage = series.images[0];
+    const imageOrientation = firstImage?.imageOrientationPatient || [];
+    const rowCosines = imageOrientation.slice(0, 3);
+    const columnCosines = imageOrientation.slice(3, 6);
+    const normalCosines =
+      rowCosines.length === 3 && columnCosines.length === 3
+        ? [
+            rowCosines[1] * columnCosines[2] - rowCosines[2] * columnCosines[1],
+            rowCosines[2] * columnCosines[0] - rowCosines[0] * columnCosines[2],
+            rowCosines[0] * columnCosines[1] - rowCosines[1] * columnCosines[0],
+          ]
+        : [0, 0, 1];
+    const slicePositions = series.images
+      .map((image) => image.sortPosition)
+      .filter((position): position is number => typeof position === "number" && Number.isFinite(position));
+    const zSpacing =
+      slicePositions.length > 1
+        ? Math.abs(slicePositions[1] - slicePositions[0]) || series.sliceThickness || 1
+        : series.sliceThickness || 1;
+    const pixelSpacing = series.pixelSpacing || [1, 1];
+    const spacing = [
+      pixelSpacing[1] || 1,
+      pixelSpacing[0] || 1,
+      zSpacing,
+    ];
+    const origin = firstImage?.imagePositionPatient || [0, 0, 0];
+    const direction = [
+      rowCosines[0] ?? 1,
+      columnCosines[0] ?? 0,
+      normalCosines[0] ?? 0,
+      rowCosines[1] ?? 0,
+      columnCosines[1] ?? 1,
+      normalCosines[1] ?? 0,
+      rowCosines[2] ?? 0,
+      columnCosines[2] ?? 0,
+      normalCosines[2] ?? 1,
+    ];
+    const affine = [
+      [
+        direction[0] * spacing[0],
+        direction[1] * spacing[1],
+        direction[2] * spacing[2],
+        origin[0],
+      ],
+      [
+        direction[3] * spacing[0],
+        direction[4] * spacing[1],
+        direction[5] * spacing[2],
+        origin[1],
+      ],
+      [
+        direction[6] * spacing[0],
+        direction[7] * spacing[1],
+        direction[8] * spacing[2],
+        origin[2],
+      ],
+    ];
+
+    return {
+      type: "dicom",
+      imageIds: localImport.localDicom.selectedSeries.images.map((image) => image.imageId),
+      emptyMessage: "Aucune image DICOM locale exploitable.",
+      metadata: {
+        affine,
+        direction,
+        intensity: {
+          max: 3071,
+          mean: 0,
+          median: 0,
+          min: -1024,
+          p1: -1024,
+          p5: -1024,
+          p95: 1024,
+          p99: 2048,
+        },
+        selected_files_count: series.images.length,
+        selected_modality: series.modality,
+        selected_protocol_name: series.protocolName,
+        selected_series_description: series.seriesDescription,
+        selected_series_instance_uid: series.seriesInstanceUid,
+        shape: [
+          firstImage?.columns || series.columns || 1,
+          firstImage?.rows || series.rows || 1,
+          series.images.length,
+        ],
+        origin,
+        source_type: "dicom-local",
+        spacing,
+      },
+    };
+  }
+
   if (volume?.volume.url) {
     return {
       metadata: volume.volume.metadata,
@@ -289,6 +395,50 @@ function getCornerstoneSource({
   }
 
   return null;
+}
+
+function createLocalWorkspace(
+  localImport: LocalStudyImport,
+  backendWorkspace?: StudyWorkspace | null,
+): StudyWorkspace {
+  const backendReady = Boolean(
+    localImport.backendStudyId && localImport.ctNiftiReady && localImport.aiReady,
+  );
+
+  return {
+    ai: backendWorkspace?.ai || {
+      modules: [],
+      runs: [],
+    },
+    analyses: backendWorkspace?.analyses || {
+      items: [],
+      latest: null,
+    },
+    available_actions: backendWorkspace?.available_actions || {
+      can_create_ai_run: backendReady,
+      can_execute_ai: backendReady,
+      can_prepare_volume: false,
+      can_publish_segmentation: backendReady,
+      can_run_label_hu_statistics: backendReady,
+    },
+    segmentations: backendWorkspace?.segmentations || {
+      items: [],
+      latest: null,
+    },
+    study: {
+      created_at: localImport.createdAt,
+      files_count: localImport.files.length,
+      id: localImport.id,
+      input_type: "dicom",
+      status: localImport.status,
+      updated_at: new Date().toISOString(),
+    },
+    viewer: backendWorkspace?.viewer || null,
+    volume: {
+      data: backendWorkspace?.volume.data || null,
+      is_prepared: Boolean(backendWorkspace?.volume.is_prepared || backendReady),
+    },
+  };
 }
 
 function createMaskLabelStates(workspace: StudyWorkspace | null): MaskLabelState[] {
@@ -388,6 +538,73 @@ function getCrosshairTargetFromMeasurement(
   };
 }
 
+function getLocalImportStatusLabel(localImport: LocalStudyImport) {
+  if (localImport.status === "LOCAL_ONLY") {
+    return {
+      backend: "en attente",
+      conversion: "en attente",
+      ia: "indisponible",
+    };
+  }
+
+  if (localImport.status === "UPLOADING") {
+    return {
+      backend: `${localImport.uploadProgress} %`,
+      conversion: "en attente",
+      ia: "indisponible",
+    };
+  }
+
+  if (localImport.status === "BACKEND_PROCESSING") {
+    return {
+      backend: "upload terminé",
+      conversion: localImport.backendStatus || "en cours",
+      ia: "disponible bientôt",
+    };
+  }
+
+  if (localImport.status === "BACKEND_READY") {
+    return {
+      backend: "prêt",
+      conversion: "ct.nii.gz prêt",
+      ia: "disponible",
+    };
+  }
+
+  if (localImport.status === "FAILED") {
+    return {
+      backend: "erreur",
+      conversion: localImport.error || "échec",
+      ia: "indisponible",
+    };
+  }
+
+  return {
+    backend: localImport.backendStatus || localImport.status,
+    conversion: localImport.ctNiftiReady ? "ct.nii.gz prêt" : "en cours",
+    ia: localImport.aiReady ? "disponible" : "indisponible",
+  };
+}
+
+function LocalImportStatusBadge({ localImport }: { localImport: LocalStudyImport }) {
+  const status = getLocalImportStatusLabel(localImport);
+
+  return (
+    <div className="pointer-events-none absolute left-3 top-3 z-30 max-w-xs rounded border border-border-soft bg-surface/95 px-3 py-2 text-[11px] shadow-xl">
+      <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+        <span className="text-text-muted">Affichage local</span>
+        <span className="font-semibold text-primary-200">prêt</span>
+        <span className="text-text-muted">Upload backend</span>
+        <span className="font-semibold text-text-soft">{status.backend}</span>
+        <span className="text-text-muted">Conversion IA</span>
+        <span className="font-semibold text-text-soft">{status.conversion}</span>
+        <span className="text-text-muted">IA</span>
+        <span className="font-semibold text-text-soft">{status.ia}</span>
+      </div>
+    </div>
+  );
+}
+
 function MedicalViewerShell({
   actionRequest,
   activeTool,
@@ -397,6 +614,7 @@ function MedicalViewerShell({
   error,
   isMaskVisible,
   isBusy,
+  localImport,
   inputType,
   maskLabels,
   maskOpacity,
@@ -426,6 +644,7 @@ function MedicalViewerShell({
   error: string | null;
   isMaskVisible: boolean;
   isBusy: boolean;
+  localImport: LocalStudyImport | null;
   inputType: string;
   maskLabels: MaskLabelState[];
   maskOpacity: number;
@@ -444,8 +663,8 @@ function MedicalViewerShell({
   onWindowPresetChange: (preset: WindowPresetId) => void;
 }) {
   const cornerstoneSource = useMemo(
-    () => getCornerstoneSource({ allowDicomFallback, viewer, volume }),
-    [allowDicomFallback, viewer, volume],
+    () => getCornerstoneSource({ allowDicomFallback, localImport, viewer, volume }),
+    [allowDicomFallback, localImport, viewer, volume],
   );
   const isReady = Boolean(cornerstoneSource);
   const unavailableMessage = getUnavailableViewerMessage(inputType);
@@ -498,35 +717,39 @@ function MedicalViewerShell({
   }
 
   return (
-    <CornerstoneViewer
-      actionRequest={actionRequest}
-      activeTool={activeTool}
-      crosshairTarget={crosshairTarget}
-      isMaskVisible={isMaskVisible}
-      isReady={isReady}
-      maskLabels={maskLabels}
-      maskOpacity={maskOpacity}
-      measurements={measurements}
-      onAddMeasurement={onAddMeasurement}
-      onActiveToolChange={onActiveToolChange}
-      onMaskOverlayStatusChange={onMaskOverlayStatusChange}
-      onSelectMeasurement={onSelectMeasurement}
-      onViewerModeChange={onViewerModeChange}
-      onWindowPresetChange={onWindowPresetChange}
-      segmentationUrl={segmentationUrl}
-      selectedMeasurementId={selectedMeasurementId}
-      showControls={false}
-      source={cornerstoneSource}
-      studyId={studyId}
-      viewerMode={viewerMode}
-      windowPreset={windowPreset}
-    />
+    <div className="relative h-full min-h-0">
+      <CornerstoneViewer
+        actionRequest={actionRequest}
+        activeTool={activeTool}
+        crosshairTarget={crosshairTarget}
+        isMaskVisible={isMaskVisible}
+        isReady={isReady}
+        maskLabels={maskLabels}
+        maskOpacity={maskOpacity}
+        measurements={measurements}
+        onAddMeasurement={onAddMeasurement}
+        onActiveToolChange={onActiveToolChange}
+        onMaskOverlayStatusChange={onMaskOverlayStatusChange}
+        onSelectMeasurement={onSelectMeasurement}
+        onViewerModeChange={onViewerModeChange}
+        onWindowPresetChange={onWindowPresetChange}
+        segmentationUrl={segmentationUrl}
+        selectedMeasurementId={selectedMeasurementId}
+        showControls={false}
+        source={cornerstoneSource}
+        studyId={studyId}
+        viewerMode={viewerMode}
+        windowPreset={windowPreset}
+      />
+      {localImport ? <LocalImportStatusBadge localImport={localImport} /> : null}
+    </div>
   );
 }
 
 export default function Workspace() {
   const navigate = useNavigate();
   const { studyId } = useParams<{ studyId: string }>();
+  const [localImportVersion, setLocalImportVersion] = useState(0);
   const [workspace, setWorkspace] = useState<StudyWorkspace | null>(null);
   const [studies, setStudies] = useState<Study[]>([]);
   const [viewer, setViewer] = useState<StudyViewerResponse | null>(null);
@@ -562,6 +785,12 @@ export default function Workspace() {
     selectedMeasurementId,
     selectMeasurement,
   } = useMeasurements(studyId);
+  const localImport = useMemo(
+    () => getLocalStudyImport(studyId),
+    [localImportVersion, studyId],
+  );
+  const backendStudyId = localImport?.backendStudyId || null;
+  const activeApiStudyId = backendStudyId || studyId;
 
   const loadWorkspace = useCallback(
     async (showLoading = false) => {
@@ -579,8 +808,24 @@ export default function Workspace() {
       loadRequestIdRef.current = loadRequestId;
 
       try {
+        const currentLocalImport = getLocalStudyImport(studyId);
+
+        if (currentLocalImport && !currentLocalImport.backendStudyId) {
+          setWorkspace(createLocalWorkspace(currentLocalImport));
+          setStudies([]);
+          setViewer(null);
+          setVolume(null);
+          setError(currentLocalImport.error);
+          return;
+        }
+
+        if (isLocalStudyId(studyId) && !currentLocalImport) {
+          throw new Error("Import local introuvable. Relancez l'import DICOM.");
+        }
+
+        const workspaceStudyId = currentLocalImport?.backendStudyId || studyId;
         const [workspaceResponse, studiesResponse, aiModulesResponse] = await Promise.all([
-          WorkspaceApi.getWorkspace(studyId),
+          WorkspaceApi.getWorkspace(workspaceStudyId),
           Studies.getStudies(),
           Ai.getModules(),
         ]);
@@ -589,13 +834,16 @@ export default function Workspace() {
           return;
         }
 
-        const nextWorkspace = {
+        const backendWorkspace = {
           ...workspaceResponse.data,
           ai: {
             ...workspaceResponse.data.ai,
             modules: aiModulesResponse.data.items,
           },
         };
+        const nextWorkspace = currentLocalImport
+          ? createLocalWorkspace(currentLocalImport, backendWorkspace)
+          : backendWorkspace;
         const nextViewer = normalizeViewer(nextWorkspace.viewer);
         const nextVolume = nextWorkspace.volume.data;
 
@@ -639,17 +887,17 @@ export default function Workspace() {
 
   const handlePrepareVolume = () => {
     void runAction(async () => {
-      if (!studyId) {
+      if (!activeApiStudyId) {
         throw new Error("Identifiant d'etude manquant.");
       }
 
-      await Studies.prepareStudy(studyId);
+      await Studies.prepareStudy(activeApiStudyId);
     });
   };
 
   const publishAiRunSegmentation = useCallback(
     async (run: AiRun, requestId?: number) => {
-      if (!studyId) {
+      if (!activeApiStudyId) {
         throw new Error("Identifiant d'etude manquant.");
       }
 
@@ -665,7 +913,7 @@ export default function Workspace() {
       setAiRunStatus("Publishing segmentation...");
 
       try {
-        const segmentationResponse = await Ai.publishSegmentation(studyId, run.id);
+        const segmentationResponse = await Ai.publishSegmentation(activeApiStudyId, run.id);
 
         if (!shouldContinue()) {
           return;
@@ -676,8 +924,8 @@ export default function Workspace() {
 
         try {
           await Promise.all([
-            Segmentations.getSegmentations(studyId),
-            Segmentations.getSegmentationLabels(studyId, segmentationResponse.data.id),
+            Segmentations.getSegmentations(activeApiStudyId),
+            Segmentations.getSegmentationLabels(activeApiStudyId, segmentationResponse.data.id),
           ]);
           setMaskLabelsMessage(null);
         } catch (labelsError) {
@@ -695,7 +943,7 @@ export default function Workspace() {
         }
       }
     },
-    [loadWorkspace, studyId],
+    [activeApiStudyId, loadWorkspace, studyId],
   );
 
   const handleRunAiPrediction = () => {
@@ -713,8 +961,12 @@ export default function Workspace() {
 
     void (async () => {
       try {
-        if (!studyId || !workspace) {
+        if (!activeApiStudyId || !workspace) {
           throw new Error("Workspace indisponible.");
+        }
+
+        if (localImport && (!localImport.backendStudyId || !localImport.ctNiftiReady || !localImport.aiReady)) {
+          throw new Error("IA indisponible: backend pas encore prêt.");
         }
 
         const nnunetModule = workspace.ai.modules.find((module) => module.id === simulationModuleId);
@@ -740,7 +992,7 @@ export default function Workspace() {
         };
         const shouldContinue = () =>
           isWorkspaceMountedRef.current && aiRunRequestIdRef.current === requestId;
-        const runResponse = await Ai.createRun(studyId, payload);
+        const runResponse = await Ai.createRun(activeApiStudyId, payload);
         const run = runResponse.data;
 
         if (!shouldContinue()) {
@@ -749,7 +1001,7 @@ export default function Workspace() {
 
         setLastAiRun(run);
         setAiRunStatus(`Created run ${run.id.slice(0, 8)} (${formatAiRunStatus(run)})`);
-        const executionResponse = await Ai.executeRun(studyId, run.id);
+        const executionResponse = await Ai.executeRun(activeApiStudyId, run.id);
 
         if (!shouldContinue()) {
           return;
@@ -767,7 +1019,7 @@ export default function Workspace() {
             setAiRunStatus(formatAiRunStatus(nextRun));
           },
           shouldContinue,
-          studyId,
+          studyId: activeApiStudyId,
         });
 
         if (!completedRun || !shouldContinue()) {
@@ -809,7 +1061,7 @@ export default function Workspace() {
 
   const handleUploadSegmentation = (file: File, name?: string, labelsFile?: File) => {
     void runAction(async () => {
-      if (!studyId || !workspace) {
+      if (!activeApiStudyId || !workspace) {
         throw new Error("Workspace indisponible.");
       }
 
@@ -817,7 +1069,7 @@ export default function Workspace() {
         throw new Error("Preparez le volume avant d'importer un masque.");
       }
 
-      await Segmentations.uploadManualSegmentation(studyId, file, {
+      await Segmentations.uploadManualSegmentation(activeApiStudyId, file, {
         labelsFile,
         name,
       });
@@ -948,6 +1200,32 @@ export default function Workspace() {
     void loadWorkspace(true);
   }, [loadWorkspace]);
 
+  useEffect(() => subscribeLocalStudyImports(() => {
+    setLocalImportVersion((version) => version + 1);
+  }), []);
+
+  useEffect(() => {
+    if (!localImport) {
+      return;
+    }
+
+    if (localImport.status === "LOCAL_ONLY") {
+      startLocalStudyBackendImport(localImport.id);
+    }
+
+    setWorkspace((currentWorkspace) => createLocalWorkspace(localImport, currentWorkspace));
+
+    if (localImport.status === "BACKEND_READY" && localImport.backendStudyId) {
+      void loadWorkspace();
+    }
+  }, [
+    loadWorkspace,
+    localImport,
+    localImport?.backendStudyId,
+    localImport?.status,
+    localImport?.uploadProgress,
+  ]);
+
   useEffect(() => {
     isWorkspaceMountedRef.current = true;
 
@@ -1048,6 +1326,10 @@ export default function Workspace() {
       return;
     }
 
+    if (localImport) {
+      return;
+    }
+
     const canPrepareVolume = getEffectiveCanPrepareVolume(workspace);
 
     if (import.meta.env.DEV) {
@@ -1079,7 +1361,7 @@ export default function Workspace() {
     void runAction(async () => {
       await Studies.prepareStudy(studyId);
     }).finally(() => setIsAutoPreparing(false));
-  }, [isBusy, runAction, studyId, workspace]);
+  }, [isBusy, localImport, runAction, studyId, workspace]);
 
   if (isLoading) {
     return (
@@ -1113,7 +1395,11 @@ export default function Workspace() {
   const allowDicomFallback = !workspace.volume.is_prepared && !canPrepareVolume && !isWorkspaceBusy;
   const nnunetModule = workspace.ai.modules.find((module) => module.id === simulationModuleId);
   const isAiModuleAvailable = Boolean(nnunetModule?.is_available && !nnunetModule.availability_error);
+  const isLocalBackendReady = !localImport || Boolean(
+    localImport.backendStudyId && localImport.ctNiftiReady && localImport.aiReady,
+  );
   const canRunAi =
+    isLocalBackendReady &&
     workspace.available_actions.can_create_ai_run &&
     workspace.available_actions.can_execute_ai &&
     workspace.volume.is_prepared &&
@@ -1122,6 +1408,9 @@ export default function Workspace() {
     !isAiPublishing;
   const aiUnavailableMessage =
     nnunetModule?.availability_error ||
+    (localImport && !isLocalBackendReady
+      ? "IA disponible quand l'import backend et ct.nii.gz sont prêts."
+      : null) ||
     (!nnunetModule
       ? "Module IA ct_anatomy_segmentation_nnunet introuvable."
       : !workspace.volume.is_prepared
@@ -1152,6 +1441,7 @@ export default function Workspace() {
           inputType={workspace.study.input_type}
           isBusy={isWorkspaceBusy}
           isMaskVisible={isMaskVisible}
+          localImport={localImport}
           maskLabels={maskLabels}
           maskOpacity={maskOpacity}
           measurements={measurements}

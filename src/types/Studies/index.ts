@@ -89,6 +89,24 @@ export type StudyVolumeResponse = {
 
 export type StudyPrepareResponse = StudyVolumeResponse;
 
+export type StudyImportSessionResponse = {
+  import_id: string;
+  status: "created" | "uploading" | "uploaded" | "converting" | "ready" | "failed" | string;
+};
+
+export type StudyImportSessionStatus = {
+  import_id?: string;
+  study_id?: string | null;
+  status: "created" | "uploading" | "uploaded" | "converting" | "ready" | "failed" | string;
+  series_uid?: string | null;
+  series_instance_uid?: string | null;
+  frame_of_reference_uid?: string | null;
+  ct_nifti_ready?: boolean;
+  ai_ready?: boolean;
+  error?: string | null;
+  message?: string | null;
+};
+
 export type ViewerNifti = {
   filename: string;
   relative_path: string;

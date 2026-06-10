@@ -21,6 +21,8 @@ import type { ApiRequest } from "~/types/api";
 import type {
   Study,
   StudyImportResponse,
+  StudyImportSessionResponse,
+  StudyImportSessionStatus,
   StudyListResponse,
   StudyPrepareResponse,
   StudyViewerResponse,
@@ -91,6 +93,51 @@ export class Studies {
     return Api.post<StudyPrepareResponse, FormData>(
       `${Studies.endpoint}/upload-dicom`,
       formData,
+    );
+  }
+
+  static createImportSession(): ApiRequest<StudyImportSessionResponse> {
+    return Api.post<StudyImportSessionResponse>(`${Studies.endpoint}/import-sessions`);
+  }
+
+  static uploadImportSessionFiles(
+    importId: string,
+    files: File[],
+    onProgress?: (progress: number) => void,
+  ): ApiRequest<StudyImportSessionStatus> {
+    const formData = new FormData();
+
+    files.forEach((file) => {
+      const fileWithRelativePath = file as FileWithRelativePath;
+      const filename = fileWithRelativePath.webkitRelativePath || file.name;
+
+      formData.append("files", file, filename);
+    });
+
+    return Api.post<StudyImportSessionStatus, FormData>(
+      `${Studies.endpoint}/import-sessions/${encodeURIComponent(importId)}/files`,
+      formData,
+      {
+        onUploadProgress: (event) => {
+          if (!event.total || !onProgress) {
+            return;
+          }
+
+          onProgress(Math.round((event.loaded / event.total) * 100));
+        },
+      },
+    );
+  }
+
+  static completeImportSession(importId: string): ApiRequest<StudyImportSessionStatus> {
+    return Api.post<StudyImportSessionStatus>(
+      `${Studies.endpoint}/import-sessions/${encodeURIComponent(importId)}/complete`,
+    );
+  }
+
+  static getImportSessionStatus(importId: string): ApiRequest<StudyImportSessionStatus> {
+    return Api.get<StudyImportSessionStatus>(
+      `${Studies.endpoint}/import-sessions/${encodeURIComponent(importId)}/status`,
     );
   }
 
